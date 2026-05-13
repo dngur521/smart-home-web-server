@@ -57,6 +57,20 @@ redis_client = None
 
 
 # --- 6. 인증/인가 헬퍼 함수 및 데코레이터 ---
+def format_rows_datetime(rows):
+    """DB에서 가져온 row의 datetime 필드에 KST(+09:00) 정보를 붙여 반환"""
+    result = []
+    for row in rows:
+        formatted = {}
+        for k, v in row.items():
+            if isinstance(v, datetime):
+                formatted[k] = v.strftime('%Y-%m-%dT%H:%M:%S+09:00')
+            else:
+                formatted[k] = v
+        result.append(formatted)
+    return result
+
+
 def get_db_connection():
     """DB 풀에서 커넥션을 가져오고, 연결 실패 시 500 에러를 발생시킵니다."""
     try:
@@ -264,7 +278,7 @@ def handle_get_dht_history():
         # 데이터 조회
         query = "SELECT * FROM sensor_data ORDER BY id DESC LIMIT %s OFFSET %s"
         cursor.execute(query, (limit, offset))
-        rows = cursor.fetchall()
+        rows = format_rows_datetime(cursor.fetchall())
 
         # 전체 카운트 조회
         total_query = "SELECT COUNT(*) AS count FROM sensor_data"
@@ -311,7 +325,7 @@ def handle_get_aircon_history():
         # 데이터 조회
         query = "SELECT * FROM history ORDER BY id DESC LIMIT %s OFFSET %s"
         cursor.execute(query, (limit, offset))
-        rows = cursor.fetchall()
+        rows = format_rows_datetime(cursor.fetchall())
 
         # 전체 카운트 조회
         total_query = "SELECT COUNT(*) AS count FROM history"
