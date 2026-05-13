@@ -392,6 +392,66 @@ def handle_get_aircon_history():
             conn.close()
 
 
+def _seek_page(table, timestamp_str, limit):
+    """주어진 timestamp에 가장 가까운 레코드가 속한 페이지 번호를 반환하는 내부 헬퍼"""
+    try:
+        # ISO 8601 파싱 (Z → +00:00 변환 후 KST로 변환)
+        ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
+        ts_kst = ts.astimezone(timezone(timedelta(hours=9))).replace(tzinfo=None)
+    except ValueError:
+        return None, "Invalid timestamp format. Use ISO 8601."
+
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        # DESC 정렬 기준: target_ts보다 최신인 레코드 수 = offset
+        cursor.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE timestamp > %s", (ts_kst,)
+        )
+        offset = cursor.fetchone()[0]
+        page = (offset // limit) + 1
+        return page, None
+    except mysql.connector.Error as e:
+        return None, str(e)
+    finally:
+        if "cursor" in locals() and cursor:
+            cursor.close()
+        if "conn" in locals() and conn:
+            conn.close()
+
+
+@app.route("/api/arduino/dht-history/seek", methods=["GET"])
+@login_required
+def handle_dht_history_seek():
+    """주어진 timestamp가 속한 온습도 이력 페이지 번호 반환"""
+    timestamp_str = request.args.get("timestamp")
+    limit = int(request.args.get("limit", 10))
+
+    if not timestamp_str:
+        return jsonify({"status": "error", "message": "timestamp is required."}), 400
+
+    page, err = _seek_page("sensor_data", timestamp_str, limit)
+    if err:
+        return jsonify({"status": "error", "message": err}), 400
+    return jsonify({"status": "success", "page": page}), 200
+
+
+@app.route("/api/arduino/aircon-history/seek", methods=["GET"])
+@login_required
+def handle_aircon_history_seek():
+    """주어진 timestamp가 속한 에어컨 제어 이력 페이지 번호 반환"""
+    timestamp_str = request.args.get("timestamp")
+    limit = int(request.args.get("limit", 10))
+
+    if not timestamp_str:
+        return jsonify({"status": "error", "message": "timestamp is required."}), 400
+
+    page, err = _seek_page("history", timestamp_str, limit)
+    if err:
+        return jsonify({"status": "error", "message": err}), 400
+    return jsonify({"status": "success", "page": page}), 200
+
+
 # --- 4. React 정적 파일 서빙 ---
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
