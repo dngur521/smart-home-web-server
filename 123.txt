@@ -1,0 +1,8 @@
+sudo nano /etc/systemd/system/cctv-local.service
+sudo systemctl daemon-reload
+sudo systemctl restart cctv-local.service
+
+pm2 status
+pm2 logs backend
+pm2 restart backend
+pm2 stop backend
