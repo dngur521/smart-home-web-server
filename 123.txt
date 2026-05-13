@@ -6,3 +6,5 @@ pm2 status
 pm2 logs backend
 pm2 restart backend
 pm2 stop backend
+
+claude --resume ecc364dc-9260-4037-8274-9acab8a3ad1f 
