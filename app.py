@@ -15,7 +15,7 @@ import mysql.connector
 import psutil
 import redis  # Redis 라이브러리
 import serial
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, make_response, request, send_from_directory
 from flask_cors import CORS
 
 # --- 설정: JWT 및 보안 설정 ---
@@ -49,9 +49,16 @@ SERIAL_PORT = "/dev/ttyUSB0"
 BAUD_RATE = 9600
 SERVER_PORT = 5000  # Node.js 서버 포트 기준
 
+# --- 설정: 쿠키 및 CORS ---
+# 개발 시 React 개발 서버 주소로 설정 (예: http://localhost:5173)
+# 프로덕션에서는 Flask가 프론트를 직접 서빙하므로 CORS 불필요하나 일관성을 위해 유지
+FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173")
+# HTTPS 환경이면 환경변수 COOKIE_SECURE=true 로 설정
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
+
 # --- 전역 변수 ---
 app = Flask(__name__, static_folder="dist")
-CORS(app, resources={r"/api/*": {"origins": "*"}})  # /api/ 경로에 대해 CORS 허용
+CORS(app, resources={r"/api/*": {"origins": FRONTEND_ORIGIN, "supports_credentials": True}})
 db_pool = None
 redis_client = None
 
@@ -135,6 +142,28 @@ def create_refresh_token(user_id: int):
     redis_client.set(redis_key, user_id, ex=expires_in_seconds)
 
     return token_value
+
+
+def set_token_cookies(response, access_token, refresh_token):
+    """응답 객체에 access/refresh 토큰을 HttpOnly 쿠키로 설정"""
+    response.set_cookie(
+        "access_token_cookie", access_token,
+        httponly=True, secure=COOKIE_SECURE, samesite="Strict",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
+    response.set_cookie(
+        "refresh_token_cookie", refresh_token,
+        httponly=True, secure=COOKIE_SECURE, samesite="Strict",
+        max_age=int(timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS).total_seconds()),
+    )
+    return response
+
+
+def clear_token_cookies(response):
+    """응답 객체에서 토큰 쿠키 삭제"""
+    response.delete_cookie("access_token_cookie")
+    response.delete_cookie("refresh_token_cookie")
+    return response
 
 
 # --- 1. 하드웨어 제어 함수 ---
@@ -474,16 +503,12 @@ def login():
             access_token = create_access_token(user_id=user_id)
             refresh_token = create_refresh_token(user_id=user_id)
 
-            return jsonify(
-                {
-                    "status": "success",
-                    "message": "Login successful.",
-                    "access_token": access_token,
-                    "refresh_token": refresh_token,
-                    "token_type": "bearer",
-                    "expires_in_minutes": ACCESS_TOKEN_EXPIRE_MINUTES,
-                }
-            ), 200
+            response = make_response(jsonify({
+                "status": "success",
+                "message": "Login successful.",
+                "expires_in_minutes": ACCESS_TOKEN_EXPIRE_MINUTES,
+            }), 200)
+            return set_token_cookies(response, access_token, refresh_token)
         else:
             return jsonify(
                 {"status": "error", "message": "Invalid username or password."}
@@ -502,9 +527,8 @@ def login():
 
 @app.route("/api/auth/refresh", methods=["POST"])
 def refresh_token():
-    """Refresh Token을 사용하여 새 Access Token 및 새 Refresh Token을 발급"""
-    data = request.get_json()
-    old_refresh_token = data.get("refresh_token")
+    """Refresh Token 쿠키로 새 Access/Refresh Token 발급 (토큰 로테이션)"""
+    old_refresh_token = request.cookies.get("refresh_token_cookie")
 
     if not old_refresh_token:
         return jsonify({"message": "Refresh token is missing."}), 400
@@ -525,20 +549,16 @@ def refresh_token():
     # 2. 토큰 사용 완료 및 무효화 (Redis에서 삭제)
     redis_client.delete(redis_key)
 
-    # 3. 새 Access Token 및 새 Refresh Token 발급
+    # 3. 새 Access Token 및 새 Refresh Token 발급 후 쿠키로 반환
     new_access_token = create_access_token(user_id=user_id)
     new_refresh_token = create_refresh_token(user_id=user_id)
 
-    return jsonify(
-        {
-            "status": "success",
-            "message": "Tokens refreshed successfully.",
-            "access_token": new_access_token,
-            "refresh_token": new_refresh_token,
-            "token_type": "bearer",
-            "expires_in_minutes": ACCESS_TOKEN_EXPIRE_MINUTES,
-        }
-    ), 200
+    response = make_response(jsonify({
+        "status": "success",
+        "message": "Tokens refreshed successfully.",
+        "expires_in_minutes": ACCESS_TOKEN_EXPIRE_MINUTES,
+    }), 200)
+    return set_token_cookies(response, new_access_token, new_refresh_token)
 
 
 @app.route("/api/user/profile", methods=["GET"])
@@ -660,21 +680,18 @@ def delete_user():
 
 @app.route("/api/auth/logout", methods=["POST"])
 def logout():
-    """로그아웃: 클라이언트 측 토큰 삭제 요청 및 서버 측 Refresh Token 무효화"""
-    data = request.get_json()
-    refresh_token = data.get("refresh_token")
+    """로그아웃: 쿠키의 Refresh Token을 Redis에서 무효화하고 쿠키 삭제"""
+    refresh_token = request.cookies.get("refresh_token_cookie")
 
     if refresh_token:
         redis_key = f"refresh:{refresh_token}"
-        # Redis에 있는 Refresh Token을 강제로 삭제하여 무효화
         redis_client.delete(redis_key)
 
-    return jsonify(
-        {
-            "status": "success",
-            "message": "Logout successful. Refresh token invalidated.",
-        }
-    ), 200
+    response = make_response(jsonify({
+        "status": "success",
+        "message": "Logout successful. Refresh token invalidated.",
+    }), 200)
+    return clear_token_cookies(response)
 
 
 def get_ssd_temp(device_name="sda"):
