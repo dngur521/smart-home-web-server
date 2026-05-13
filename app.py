@@ -191,8 +191,15 @@ def read_and_save_dht_data_task():
         if "conn" in locals() and conn:
             conn.close()  # 커넥션을 풀에 반환
 
-    # 5분(300초) 후에 다시 실행
-    threading.Timer(300, read_and_save_dht_data_task).start()
+    # 다음 5분 정각(:00, :05, :10, ...)까지 남은 시간 계산
+    now = datetime.now()
+    next_minute = (now.minute // 5 + 1) * 5
+    if next_minute >= 60:
+        next_run = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    else:
+        next_run = now.replace(minute=next_minute, second=0, microsecond=0)
+    delay = (next_run - datetime.now()).total_seconds()
+    threading.Timer(delay, read_and_save_dht_data_task).start()
 
 
 # --- 3. API 엔드포인트 정의 ---
@@ -835,7 +842,15 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # 백그라운드 센서 데이터 수집 스레드 시작
-    sensor_thread = threading.Timer(10, read_and_save_dht_data_task)  # 10초 후 첫 실행
+    # 첫 실행도 다음 5분 정각에 맞춤
+    now = datetime.now()
+    next_minute = (now.minute // 5 + 1) * 5
+    if next_minute >= 60:
+        first_run = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    else:
+        first_run = now.replace(minute=next_minute, second=0, microsecond=0)
+    first_delay = (first_run - datetime.now()).total_seconds()
+    sensor_thread = threading.Timer(first_delay, read_and_save_dht_data_task)
     sensor_thread.daemon = True
     sensor_thread.start()
     print("Background sensor reading thread started.")
