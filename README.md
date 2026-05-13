@@ -3,7 +3,7 @@
 라즈베리파이 2 기반 스마트홈 시스템의 Flask 백엔드 서버.  
 에어컨 IR 제어(Arduino 시리얼), DHT22 온습도 수집, 사용자 인증, 시스템 모니터링 API를 제공한다.
 
-프론트엔드: [new-smart-app](../new-smart-app) (React + Vite)
+프론트엔드: [new-smart-app](https://github.com/dngur521/new-smart-app) (React + Vite)
 
 ---
 
@@ -20,13 +20,13 @@
 
 ## 실행 전 준비
 
-| 항목 | 설정 |
-|---|---|
-| MySQL | `127.0.0.1:3306`, DB: `smart_home`, user: `master` / `1234` |
-| Redis | `localhost:6379` |
-| 환경 변수 | `SECRET_KEY` 필수 (미설정 시 불안전한 기본값 사용) |
+| 항목            | 설정                                                                |
+| --------------- | ------------------------------------------------------------------- |
+| MySQL           | `127.0.0.1:3306`, DB: `smart_home`, user: `master` / `1234`         |
+| Redis           | `localhost:6379`                                                    |
+| 환경 변수       | `SECRET_KEY` 필수 (미설정 시 불안전한 기본값 사용)                  |
 | 프론트엔드 빌드 | `new-smart-app`에서 `npm run build` 후 `dist/`를 이 디렉토리에 복사 |
-| smartctl sudo | `sudo visudo`로 `smartctl` passwordless 허용 (SSD 온도 조회용) |
+| smartctl sudo   | `sudo visudo`로 `smartctl` passwordless 허용 (SSD 온도 조회용)      |
 
 테이블(`history`, `sensor_data`, `users`)은 서버 시작 시 자동 생성된다.
 
@@ -48,30 +48,30 @@ python3 app.py
 
 ## 환경 변수
 
-| 변수 | 설명 | 기본값 |
-|---|---|---|
-| `SECRET_KEY` | JWT 서명 키 | `your_super_secret_key_change_me` (변경 필수) |
-| `FRONTEND_ORIGIN` | CORS 허용 Origin (개발 시 React dev 서버 주소) | `http://localhost:5173` |
-| `COOKIE_SECURE` | HTTPS 환경에서 `true`로 설정 | `false` |
+| 변수              | 설명                                           | 기본값                                        |
+| ----------------- | ---------------------------------------------- | --------------------------------------------- |
+| `SECRET_KEY`      | JWT 서명 키                                    | `your_super_secret_key_change_me` (변경 필수) |
+| `FRONTEND_ORIGIN` | CORS 허용 Origin (개발 시 React dev 서버 주소) | `http://localhost:5173`                       |
+| `COOKIE_SECURE`   | HTTPS 환경에서 `true`로 설정                   | `false`                                       |
 
 ---
 
 ## API 엔드포인트
 
-| 메서드 | 경로 | 인증 | 설명 |
-|---|---|:---:|---|
-| POST | `/api/auth/register` | ✗ | 회원가입 |
-| POST | `/api/auth/login` | ✗ | 로그인 (HttpOnly 쿠키 발급) |
-| POST | `/api/auth/refresh` | ✗ | 토큰 갱신 (쿠키 로테이션) |
-| POST | `/api/auth/logout` | ✗ | 로그아웃 (쿠키 삭제) |
-| GET | `/api/user/profile` | ✓ | 내 정보 조회 |
-| PUT | `/api/user/update-password` | ✓ | 비밀번호 변경 |
-| DELETE | `/api/user/delete` | ✓ | 계정 삭제 |
-| POST | `/api/arduino/send-command` | ✓ | Arduino 명령 전송 + 이력 저장 |
-| GET | `/api/arduino/dht-sensor` | ✓ | 실시간 온습도 조회 |
-| GET | `/api/arduino/dht-history` | ✓ | 온습도 이력 (`?page=&limit=`) |
-| GET | `/api/arduino/aircon-history` | ✓ | 에어컨 제어 이력 (`?page=&limit=`) |
-| GET | `/api/system/stats` | ✓ | CPU / RAM / 디스크 / 네트워크 통계 |
+| 메서드 | 경로                          | 인증 | 설명                               |
+| ------ | ----------------------------- | :--: | ---------------------------------- |
+| POST   | `/api/auth/register`          |  ✗   | 회원가입                           |
+| POST   | `/api/auth/login`             |  ✗   | 로그인 (HttpOnly 쿠키 발급)        |
+| POST   | `/api/auth/refresh`           |  ✗   | 토큰 갱신 (쿠키 로테이션)          |
+| POST   | `/api/auth/logout`            |  ✗   | 로그아웃 (쿠키 삭제)               |
+| GET    | `/api/user/profile`           |  ✓   | 내 정보 조회                       |
+| PUT    | `/api/user/update-password`   |  ✓   | 비밀번호 변경                      |
+| DELETE | `/api/user/delete`            |  ✓   | 계정 삭제                          |
+| POST   | `/api/arduino/send-command`   |  ✓   | Arduino 명령 전송 + 이력 저장      |
+| GET    | `/api/arduino/dht-sensor`     |  ✓   | 실시간 온습도 조회                 |
+| GET    | `/api/arduino/dht-history`    |  ✓   | 온습도 이력 (`?page=&limit=`)      |
+| GET    | `/api/arduino/aircon-history` |  ✓   | 에어컨 제어 이력 (`?page=&limit=`) |
+| GET    | `/api/system/stats`           |  ✓   | CPU / RAM / 디스크 / 네트워크 통계 |
 
 ---
 
@@ -87,11 +87,11 @@ JWT를 **HttpOnly 쿠키**로 관리한다.
 
 ## 데이터베이스 스키마
 
-| 테이블 | 컬럼 |
-|---|---|
-| `users` | `id`, `username` (unique), `password_hash`, `is_active`, `created_at` |
-| `sensor_data` | `id`, `temperature`, `humidity`, `timestamp` |
-| `history` | `id`, `command`, `response`, `timestamp` |
+| 테이블        | 컬럼                                                                  |
+| ------------- | --------------------------------------------------------------------- |
+| `users`       | `id`, `username` (unique), `password_hash`, `is_active`, `created_at` |
+| `sensor_data` | `id`, `temperature`, `humidity`, `timestamp`                          |
+| `history`     | `id`, `command`, `response`, `timestamp`                              |
 
 ---
 
