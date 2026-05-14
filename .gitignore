@@ -3,3 +3,5 @@
 /dist_old1
 /venv
 .gitignore
+.vscode
+*/build

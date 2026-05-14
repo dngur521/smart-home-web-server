@@ -14,6 +14,7 @@ import jwt  # JWT (JSON Web Token) 처리
 import mysql.connector
 import psutil
 import redis  # Redis 라이브러리
+import requests
 import serial
 from flask import Flask, jsonify, make_response, request, send_from_directory
 from flask_cors import CORS
@@ -48,6 +49,9 @@ SENSOR_PIN = 26
 SERIAL_PORT = "/dev/ttyUSB0"
 BAUD_RATE = 9600
 SERVER_PORT = 5000  # Node.js 서버 포트 기준
+DUST_SENSOR_URL = os.environ.get(
+    "DUST_SENSOR_URL", "http://192.168.0.38/dust"
+)  # Wemos D1 IP로 변경
 
 # --- 설정: 쿠키 및 CORS ---
 # 개발 시 React 개발 서버 주소로 설정 (예: http://localhost:5173)
@@ -58,7 +62,10 @@ COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "false").lower() == "true"
 
 # --- 전역 변수 ---
 app = Flask(__name__, static_folder="dist")
-CORS(app, resources={r"/api/*": {"origins": FRONTEND_ORIGIN, "supports_credentials": True}})
+CORS(
+    app,
+    resources={r"/api/*": {"origins": FRONTEND_ORIGIN, "supports_credentials": True}},
+)
 db_pool = None
 redis_client = None
 
@@ -71,7 +78,7 @@ def format_rows_datetime(rows):
         formatted = {}
         for k, v in row.items():
             if isinstance(v, datetime):
-                formatted[k] = v.strftime('%Y-%m-%dT%H:%M:%S+09:00')
+                formatted[k] = v.strftime("%Y-%m-%dT%H:%M:%S+09:00")
             else:
                 formatted[k] = v
         result.append(formatted)
@@ -147,13 +154,19 @@ def create_refresh_token(user_id: int):
 def set_token_cookies(response, access_token, refresh_token):
     """응답 객체에 access/refresh 토큰을 HttpOnly 쿠키로 설정"""
     response.set_cookie(
-        "access_token_cookie", access_token,
-        httponly=True, secure=COOKIE_SECURE, samesite="Strict",
+        "access_token_cookie",
+        access_token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="Strict",
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
     response.set_cookie(
-        "refresh_token_cookie", refresh_token,
-        httponly=True, secure=COOKIE_SECURE, samesite="Strict",
+        "refresh_token_cookie",
+        refresh_token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="Strict",
         max_age=int(timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS).total_seconds()),
     )
     return response
@@ -220,7 +233,11 @@ def read_and_save_dht_data_task():
         if "conn" in locals() and conn:
             conn.close()  # 커넥션을 풀에 반환
 
-    # 다음 5분 정각(:00, :05, :10, ...)까지 남은 시간 계산
+    _schedule_next_5min(read_and_save_dht_data_task)
+
+
+def _schedule_next_5min(task_fn):
+    """다음 5분 정각(:00, :05, :10, ...)까지 남은 시간을 계산해 task_fn을 예약"""
     now = datetime.now()
     next_minute = (now.minute // 5 + 1) * 5
     if next_minute >= 60:
@@ -228,7 +245,45 @@ def read_and_save_dht_data_task():
     else:
         next_run = now.replace(minute=next_minute, second=0, microsecond=0)
     delay = (next_run - datetime.now()).total_seconds()
-    threading.Timer(delay, read_and_save_dht_data_task).start()
+    t = threading.Timer(delay, task_fn)
+    t.daemon = True
+    t.start()
+
+
+def read_and_save_dust_data_task():
+    """5분 정각마다 Wemos D1의 /dust 엔드포인트를 GET해서 dust_data 테이블에 저장"""
+    global db_pool
+    try:
+        resp = requests.get(DUST_SENSOR_URL, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if data.get("status") != "success":
+            print(f"Dust sensor returned error: {data}", file=sys.stderr)
+        else:
+            conn = db_pool.get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO dust_data (pm1_0, pm2_5, pm10, timestamp) VALUES (%s, %s, %s, NOW())",
+                (data["pm1_0"], data["pm2_5"], data["pm10"]),
+            )
+            conn.commit()
+            print(
+                f"Dust data saved: PM1.0={data['pm1_0']} PM2.5={data['pm2_5']} PM10={data['pm10']}"
+            )
+    except requests.RequestException as e:
+        print(f"Dust sensor fetch error: {e}", file=sys.stderr)
+    except mysql.connector.Error as e:
+        print(f"DB error saving dust data: {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"Unexpected error in dust task: {e}", file=sys.stderr)
+    finally:
+        if "cursor" in locals() and cursor:
+            cursor.close()
+        if "conn" in locals() and conn:
+            conn.close()
+
+    _schedule_next_5min(read_and_save_dust_data_task)
 
 
 # --- 3. API 엔드포인트 정의 ---
@@ -364,7 +419,9 @@ def handle_get_dht_history_today():
         return jsonify({"status": "success", "data": rows}), 200
     except mysql.connector.Error as e:
         print(f"Database error on /dht-history/today: {e}", file=sys.stderr)
-        return jsonify({"status": "error", "message": "Failed to fetch today's sensor data."}), 500
+        return jsonify(
+            {"status": "error", "message": "Failed to fetch today's sensor data."}
+        ), 500
     except Exception as e:
         print(f"Error on /dht-history/today: {e}", file=sys.stderr)
         return jsonify({"status": "error", "message": "Internal server error."}), 500
@@ -435,9 +492,7 @@ def _seek_page(table, timestamp_str, limit):
         conn = db_pool.get_connection()
         cursor = conn.cursor()
         # DESC 정렬 기준: target_ts보다 최신인 레코드 수 = offset
-        cursor.execute(
-            f"SELECT COUNT(*) FROM {table} WHERE timestamp > %s", (ts_kst,)
-        )
+        cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE timestamp > %s", (ts_kst,))
         offset = cursor.fetchone()[0]
         page = (offset // limit) + 1
         return page, None
@@ -480,6 +535,149 @@ def handle_aircon_history_seek():
     if err:
         return jsonify({"status": "error", "message": err}), 400
     return jsonify({"status": "success", "page": page}), 200
+
+
+@app.route("/api/sensor/dust", methods=["POST"])
+def receive_dust_data():
+    """ESP8266이 5분마다 미세먼지 데이터를 전송하는 수신 엔드포인트 (인증 없음)"""
+    data = request.get_json()
+    if not data:
+        return jsonify({"status": "error", "message": "No JSON body"}), 400
+
+    pm1_0 = data.get("pm1_0")
+    pm2_5 = data.get("pm2_5")
+    pm10 = data.get("pm10")
+
+    if pm1_0 is None or pm2_5 is None or pm10 is None:
+        return jsonify(
+            {"status": "error", "message": "pm1_0, pm2_5, pm10 are required"}
+        ), 400
+
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify(
+            {"status": "error", "message": "Database connection failed."}
+        ), 500
+
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO dust_data (pm1_0, pm2_5, pm10, timestamp) VALUES (%s, %s, %s, NOW())",
+            (int(pm1_0), int(pm2_5), int(pm10)),
+        )
+        conn.commit()
+        print(f"Dust data saved: PM1.0={pm1_0} PM2.5={pm2_5} PM10={pm10}")
+        return jsonify({"status": "success"}), 201
+    except mysql.connector.Error as e:
+        print(f"DB error on /sensor/dust: {e}", file=sys.stderr)
+        return jsonify({"status": "error", "message": "Database error."}), 500
+    finally:
+        if "cursor" in locals() and cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+@app.route("/api/arduino/dust-sensor", methods=["GET"])
+@login_required
+def handle_get_dust_sensor():
+    """DB에서 최신 미세먼지 데이터 조회"""
+    conn = get_db_connection()
+    if conn is None:
+        return jsonify(
+            {"status": "error", "message": "Database connection failed."}
+        ), 500
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM dust_data ORDER BY id DESC LIMIT 1")
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({"status": "error", "message": "No dust data yet."}), 503
+        return jsonify(
+            {"status": "success", "data": format_rows_datetime([row])[0]}
+        ), 200
+    except mysql.connector.Error as e:
+        print(f"DB error on /dust-sensor: {e}", file=sys.stderr)
+        return jsonify({"status": "error", "message": "Database error."}), 500
+    finally:
+        if "cursor" in locals() and cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+@app.route("/api/arduino/environment-history", methods=["GET"])
+@login_required
+def handle_environment_history():
+    """온습도(sensor_data) + 미세먼지(dust_data)를 5분 버킷 기준 JOIN하여 반환 (페이지네이션)"""
+    global db_pool
+    try:
+        page = int(request.args.get("page", 1))
+        limit = int(request.args.get("limit", 10))
+        offset = (page - 1) * limit
+
+        conn = db_pool.get_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        data_query = """
+            SELECT
+              FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(timestamp) / 300) * 300) AS timestamp,
+              MAX(temperature) AS temperature,
+              MAX(humidity)    AS humidity,
+              MAX(pm1_0)       AS pm1_0,
+              MAX(pm2_5)       AS pm2_5,
+              MAX(pm10)        AS pm10
+            FROM (
+              SELECT timestamp, temperature, humidity,
+                     NULL AS pm1_0, NULL AS pm2_5, NULL AS pm10
+              FROM sensor_data
+              UNION ALL
+              SELECT timestamp, NULL AS temperature, NULL AS humidity,
+                     pm1_0, pm2_5, pm10
+              FROM dust_data
+            ) combined
+            GROUP BY FLOOR(UNIX_TIMESTAMP(timestamp) / 300)
+            ORDER BY timestamp DESC
+            LIMIT %s OFFSET %s
+        """
+        cursor.execute(data_query, (limit, offset))
+        rows = format_rows_datetime(cursor.fetchall())
+
+        count_query = """
+            SELECT COUNT(*) AS count FROM (
+              SELECT DISTINCT FLOOR(UNIX_TIMESTAMP(timestamp) / 300) AS bucket
+              FROM (
+                SELECT timestamp FROM sensor_data
+                UNION ALL
+                SELECT timestamp FROM dust_data
+              ) all_ts
+            ) cnt
+        """
+        cursor.execute(count_query)
+        total = cursor.fetchone()["count"]
+
+        return jsonify(
+            {
+                "status": "success",
+                "data": rows,
+                "total": total,
+                "page": page,
+                "limit": limit,
+            }
+        ), 200
+    except mysql.connector.Error as e:
+        print(f"DB error on /environment-history: {e}", file=sys.stderr)
+        return jsonify(
+            {"status": "error", "message": "Failed to fetch environment history."}
+        ), 500
+    except Exception as e:
+        print(f"Error on /environment-history: {e}", file=sys.stderr)
+        return jsonify({"status": "error", "message": "Internal server error."}), 500
+    finally:
+        if "cursor" in locals() and cursor:
+            cursor.close()
+        if "conn" in locals() and conn:
+            conn.close()
 
 
 # --- 4. React 정적 파일 서빙 ---
@@ -593,11 +791,16 @@ def login():
             access_token = create_access_token(user_id=user_id)
             refresh_token = create_refresh_token(user_id=user_id)
 
-            response = make_response(jsonify({
-                "status": "success",
-                "message": "Login successful.",
-                "expires_in_minutes": ACCESS_TOKEN_EXPIRE_MINUTES,
-            }), 200)
+            response = make_response(
+                jsonify(
+                    {
+                        "status": "success",
+                        "message": "Login successful.",
+                        "expires_in_minutes": ACCESS_TOKEN_EXPIRE_MINUTES,
+                    }
+                ),
+                200,
+            )
             return set_token_cookies(response, access_token, refresh_token)
         else:
             return jsonify(
@@ -643,11 +846,16 @@ def refresh_token():
     new_access_token = create_access_token(user_id=user_id)
     new_refresh_token = create_refresh_token(user_id=user_id)
 
-    response = make_response(jsonify({
-        "status": "success",
-        "message": "Tokens refreshed successfully.",
-        "expires_in_minutes": ACCESS_TOKEN_EXPIRE_MINUTES,
-    }), 200)
+    response = make_response(
+        jsonify(
+            {
+                "status": "success",
+                "message": "Tokens refreshed successfully.",
+                "expires_in_minutes": ACCESS_TOKEN_EXPIRE_MINUTES,
+            }
+        ),
+        200,
+    )
     return set_token_cookies(response, new_access_token, new_refresh_token)
 
 
@@ -777,10 +985,15 @@ def logout():
         redis_key = f"refresh:{refresh_token}"
         redis_client.delete(redis_key)
 
-    response = make_response(jsonify({
-        "status": "success",
-        "message": "Logout successful. Refresh token invalidated.",
-    }), 200)
+    response = make_response(
+        jsonify(
+            {
+                "status": "success",
+                "message": "Logout successful. Refresh token invalidated.",
+            }
+        ),
+        200,
+    )
     return clear_token_cookies(response)
 
 
@@ -928,6 +1141,15 @@ if __name__ == "__main__":
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS dust_data (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                pm1_0 INT NOT NULL,
+                pm2_5 INT NOT NULL,
+                pm10  INT NOT NULL,
+                timestamp DATETIME NOT NULL
+            )
+        """)
         # --- Redis 클라이언트 생성 ---
         # global redis_client
         redis_client = redis.StrictRedis(
@@ -948,19 +1170,10 @@ if __name__ == "__main__":
         print(f"Error initializing database: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # 백그라운드 센서 데이터 수집 스레드 시작
-    # 첫 실행도 다음 5분 정각에 맞춤
-    now = datetime.now()
-    next_minute = (now.minute // 5 + 1) * 5
-    if next_minute >= 60:
-        first_run = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    else:
-        first_run = now.replace(minute=next_minute, second=0, microsecond=0)
-    first_delay = (first_run - datetime.now()).total_seconds()
-    sensor_thread = threading.Timer(first_delay, read_and_save_dht_data_task)
-    sensor_thread.daemon = True
-    sensor_thread.start()
-    print("Background sensor reading thread started.")
+    # 백그라운드 센서 데이터 수집 — 둘 다 다음 5분 정각에 첫 실행
+    _schedule_next_5min(read_and_save_dht_data_task)
+    _schedule_next_5min(read_and_save_dust_data_task)
+    print("Background sensor threads started (DHT22 + Dust).")
 
     # Flask 서버 실행 (Node.js 포트 5000번, 모든 IP에서 접근 가능)
     print(f"Starting server on http://0.0.0.0:{SERVER_PORT}")
