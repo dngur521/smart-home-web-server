@@ -1,7 +1,7 @@
 # Smart Home Web Server — 백엔드
 
 라즈베리파이 2 기반 스마트홈 시스템의 Flask 백엔드 서버.  
-에어컨 IR 제어(Arduino 시리얼), DHT22 온습도 수집, 사용자 인증, 시스템 모니터링 API를 제공한다.
+에어컨 IR 제어(Arduino 시리얼), DHT22 온습도 수집, PMS7003 미세먼지 수집, 사용자 인증, 시스템 모니터링 API를 제공한다.
 
 프론트엔드: [new-smart-app](https://github.com/dngur521/new-smart-app) (React + Vite)
 
@@ -13,8 +13,22 @@
 - **MySQL** — 센서 데이터 / 제어 이력 / 사용자 저장
 - **Redis** — Refresh Token 저장 (7일 TTL, 로테이션)
 - **Adafruit_DHT** — DHT22 온습도 센서 (GPIO 26)
+- **requests** — Wemos D1 미세먼지 센서 HTTP 폴링
 - **pyserial** — Arduino 시리얼 통신 (`/dev/ttyUSB0`)
 - **bcrypt / PyJWT** — 비밀번호 해싱 및 JWT 인증
+
+---
+
+## 하드웨어 구성
+
+| 장치 | 역할 |
+| ---- | ---- |
+| 라즈베리파이 2 | 백엔드 서버 실행 |
+| DHT22 | 온습도 센서 (GPIO 26) |
+| Arduino (USB) | 에어컨 IR 제어 (`/dev/ttyUSB0`) |
+| Wemos D1 (ESP8266) + PMS7003 | WiFi 미세먼지 센서 모듈 (`Sensor/Sensor.ino`) |
+
+Wemos D1은 독립적인 WiFi HTTP 서버로 동작하며, 라즈베리파이 백엔드가 5분 정각마다 `/dust` 엔드포인트를 폴링해서 DB에 저장한다.
 
 ---
 
@@ -25,10 +39,11 @@
 | MySQL           | `127.0.0.1:3306`, DB: `smart_home`, user: `master` / `1234`         |
 | Redis           | `localhost:6379`                                                    |
 | 환경 변수       | `SECRET_KEY` 필수 (미설정 시 불안전한 기본값 사용)                  |
+| `DUST_SENSOR_URL` | Wemos D1 IP 주소 (예: `http://192.168.0.38/dust`)                 |
 | 프론트엔드 빌드 | `new-smart-app`에서 `npm run build` 후 `dist/`를 이 디렉토리에 복사 |
 | smartctl sudo   | `sudo visudo`로 `smartctl` passwordless 허용 (SSD 온도 조회용)      |
 
-테이블(`history`, `sensor_data`, `users`)은 서버 시작 시 자동 생성된다.
+테이블(`history`, `sensor_data`, `users`, `dust_data`)은 서버 시작 시 자동 생성된다.
 
 ---
 
@@ -53,25 +68,33 @@ python3 app.py
 | `SECRET_KEY`      | JWT 서명 키                                    | `your_super_secret_key_change_me` (변경 필수) |
 | `FRONTEND_ORIGIN` | CORS 허용 Origin (개발 시 React dev 서버 주소) | `http://localhost:5173`                       |
 | `COOKIE_SECURE`   | HTTPS 환경에서 `true`로 설정                   | `false`                                       |
+| `DUST_SENSOR_URL` | Wemos D1 미세먼지 센서 주소                    | `http://192.168.0.x/dust` (변경 필수)         |
 
 ---
 
 ## API 엔드포인트
 
-| 메서드 | 경로                          | 인증 | 설명                               |
-| ------ | ----------------------------- | :--: | ---------------------------------- |
-| POST   | `/api/auth/register`          |  ✗   | 회원가입                           |
-| POST   | `/api/auth/login`             |  ✗   | 로그인 (HttpOnly 쿠키 발급)        |
-| POST   | `/api/auth/refresh`           |  ✗   | 토큰 갱신 (쿠키 로테이션)          |
-| POST   | `/api/auth/logout`            |  ✗   | 로그아웃 (쿠키 삭제)               |
-| GET    | `/api/user/profile`           |  ✓   | 내 정보 조회                       |
-| PUT    | `/api/user/update-password`   |  ✓   | 비밀번호 변경                      |
-| DELETE | `/api/user/delete`            |  ✓   | 계정 삭제                          |
-| POST   | `/api/arduino/send-command`   |  ✓   | Arduino 명령 전송 + 이력 저장      |
-| GET    | `/api/arduino/dht-sensor`     |  ✓   | 실시간 온습도 조회                 |
-| GET    | `/api/arduino/dht-history`    |  ✓   | 온습도 이력 (`?page=&limit=`)      |
-| GET    | `/api/arduino/aircon-history` |  ✓   | 에어컨 제어 이력 (`?page=&limit=`) |
-| GET    | `/api/system/stats`           |  ✓   | CPU / RAM / 디스크 / 네트워크 통계 |
+| 메서드 | 경로                                  | 인증 | 설명                                        |
+| ------ | ------------------------------------- | :--: | ------------------------------------------- |
+| POST   | `/api/auth/register`                  |  ✗   | 회원가입                                    |
+| POST   | `/api/auth/login`                     |  ✗   | 로그인 (HttpOnly 쿠키 발급)                 |
+| POST   | `/api/auth/refresh`                   |  ✗   | 토큰 갱신 (쿠키 로테이션)                   |
+| POST   | `/api/auth/logout`                    |  ✗   | 로그아웃 (쿠키 삭제)                        |
+| GET    | `/api/user/profile`                   |  ✓   | 내 정보 조회                                |
+| PUT    | `/api/user/update-password`           |  ✓   | 비밀번호 변경                               |
+| DELETE | `/api/user/delete`                    |  ✓   | 계정 삭제                                   |
+| POST   | `/api/arduino/send-command`           |  ✓   | Arduino 명령 전송 + 이력 저장               |
+| GET    | `/api/arduino/dht-sensor`             |  ✓   | 실시간 온습도 조회                          |
+| GET    | `/api/arduino/dht-history`            |  ✓   | 온습도 이력 (`?page=&limit=`)               |
+| GET    | `/api/arduino/dht-history/today`      |  ✓   | 오늘 온습도 전체 (ASC)                      |
+| GET    | `/api/arduino/dht-history/seek`       |  ✓   | timestamp 기준 페이지 번호 반환             |
+| GET    | `/api/arduino/aircon-history`         |  ✓   | 에어컨 제어 이력 (`?page=&limit=`)          |
+| GET    | `/api/arduino/aircon-history/seek`    |  ✓   | timestamp 기준 페이지 번호 반환             |
+| GET    | `/api/arduino/dust-sensor`            |  ✓   | 최신 미세먼지 1건 조회                      |
+| GET    | `/api/arduino/dust-history`           |  ✓   | 미세먼지 이력 (`?page=&limit=`)             |
+| GET    | `/api/arduino/dust-history/today`     |  ✓   | 오늘 미세먼지 전체 (ASC)                    |
+| GET    | `/api/arduino/environment-history`    |  ✓   | 온습도+미세먼지 5분 버킷 통합 이력          |
+| GET    | `/api/system/stats`                   |  ✓   | CPU / RAM / 디스크 / 네트워크 통계          |
 
 ---
 
@@ -92,12 +115,16 @@ JWT를 **HttpOnly 쿠키**로 관리한다.
 | `users`       | `id`, `username` (unique), `password_hash`, `is_active`, `created_at` |
 | `sensor_data` | `id`, `temperature`, `humidity`, `timestamp`                          |
 | `history`     | `id`, `command`, `response`, `timestamp`                              |
+| `dust_data`   | `id`, `pm1_0`, `pm2_5`, `pm10`, `timestamp`                           |
 
 ---
 
 ## 센서 데이터 수집
 
-백그라운드 스레드가 매 5분 정각(`HH:00`, `HH:05`, `HH:10`, …)에 DHT22 센서를 읽어 `sensor_data`에 저장한다.
+백그라운드 스레드 2개가 매 5분 정각(`HH:00`, `HH:05`, `HH:10`, …)에 실행된다.
+
+- **DHT22**: 라즈베리파이 GPIO 26에서 직접 읽어 `sensor_data`에 저장
+- **PMS7003**: Wemos D1의 `/dust` 엔드포인트를 HTTP GET 후 `dust_data`에 저장
 
 ---
 

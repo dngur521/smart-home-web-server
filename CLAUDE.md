@@ -6,6 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Flask-based smart home backend server designed to run on a **Raspberry Pi**. It consolidates what was previously a Node.js server and a separate Python hardware script into a single `app.py`. It serves a pre-built React app from `dist/` and exposes REST APIs for hardware control, sensor data, user auth, and system monitoring.
 
+A **Wemos D1 (ESP8266)** module running `Sensor/Sensor.ino` connects to the local WiFi and serves PMS7003 dust sensor data at `http://<IP>/dust`. The Raspberry Pi backend polls this endpoint every 5 minutes.
+
 ## Running the Server
 
 ```bash
@@ -23,8 +25,9 @@ The server listens on `http://0.0.0.0:5000`.
 - Redis running at `localhost:6379`
 - `SECRET_KEY` environment variable set (falls back to an insecure default)
 - React frontend built to `dist/` (the server serves `dist/index.html` for all non-API routes)
+- `DUST_SENSOR_URL` environment variable set to `http://<Wemos D1 IP>/dust`
 
-On startup, `app.py` auto-creates the `history`, `sensor_data`, and `users` tables if they don't exist.
+On startup, `app.py` auto-creates the `history`, `sensor_data`, `users`, `dust_data` tables if they don't exist.
 
 ## Architecture
 
@@ -34,25 +37,31 @@ The entire backend is a **single file**: `app.py`. There are no modules or packa
 
 | Lines | Purpose |
 |-------|---------|
-| 1–53 | Config constants and global `app`, `db_pool`, `redis_client` |
-| 56–113 | Auth helpers: `get_db_connection()`, `login_required` decorator, `create_access_token()`, `create_refresh_token()` |
-| 116–163 | Hardware: `send_command_to_arduino()` (serial), `read_and_save_dht_data_task()` (background timer, runs every 5 min) |
-| 168–310 | Arduino/sensor API endpoints |
-| 313–329 | React SPA catch-all static file serving from `dist/` |
-| 333–547 | User auth/profile API endpoints |
-| 549–646 | System stats: `get_ssd_temp()` + `/api/system/stats` endpoint |
-| 649–716 | `__main__` startup: DB pool init, table creation, Redis connect, sensor thread, Flask run |
+| 1–55 | Config constants and global `app`, `db_pool`, `redis_client`, `DUST_SENSOR_URL` |
+| 56–180 | Auth helpers: `get_db_connection()`, `login_required` decorator, token helpers, cookie helpers |
+| 182–280 | Hardware: `send_command_to_arduino()`, `_schedule_next_5min()`, `read_and_save_dht_data_task()`, `read_and_save_dust_data_task()` |
+| 280–600 | Arduino/sensor API endpoints |
+| 600~ | React SPA catch-all, user auth/profile endpoints, system stats |
+
+### Background Tasks
+
+두 백그라운드 태스크가 5분 정각(:00, :05, :10, …)마다 실행된다.
+
+- `read_and_save_dht_data_task()` — Raspberry Pi GPIO 26의 DHT22 센서 읽어 `sensor_data` 저장
+- `read_and_save_dust_data_task()` — Wemos D1의 `/dust` 엔드포인트 GET 후 `dust_data` 저장
+- `_schedule_next_5min(fn)` — 다음 5분 정각까지 남은 시간을 계산해 `threading.Timer`로 예약하는 공통 헬퍼
 
 ### Authentication Flow
 
-- **Access token**: HS256 JWT, 30-minute expiry, stored by client
-- **Refresh token**: UUID stored in Redis with key `refresh:<uuid>`, 7-day TTY; rotation on every use (old token deleted, new one issued)
+- **Access token**: HS256 JWT, 30-minute expiry, HttpOnly cookie (`access_token_cookie`)
+- **Refresh token**: UUID stored in Redis with key `refresh:<uuid>`, 7-day TTL; rotation on every use
 - **`login_required` decorator**: reads token from `Authorization: Bearer` header or `access_token_cookie` cookie
 
 ### Hardware Dependencies (Raspberry Pi specific)
 
 - **DHT22 sensor**: GPIO pin 26, read via `Adafruit_DHT` library
 - **Arduino**: serial on `/dev/ttyUSB0` at 9600 baud
+- **Wemos D1 (ESP8266)**: WiFi HTTP server, polls `/dust` for PMS7003 data (`DUST_SENSOR_URL`)
 - **CPU temp**: `vcgencmd measure_temp` subprocess call
 - **SSD temp**: `sudo smartctl -A /dev/sda` subprocess call (requires passwordless sudo for `smartctl`)
 
@@ -63,15 +72,18 @@ The entire backend is a **single file**: `app.py`. There are no modules or packa
 | `users` | `id`, `username` (unique), `password_hash`, `is_active` (BOOL, default FALSE), `created_at` |
 | `sensor_data` | `id`, `temperature`, `humidity`, `timestamp` |
 | `history` | `id`, `command`, `response`, `timestamp` |
+| `dust_data` | `id`, `pm1_0`, `pm2_5`, `pm10`, `timestamp` |
 
 New users are created with `is_active = FALSE`; an admin must activate accounts manually in the DB.
+
+모든 timestamp는 DB에 로컬 시간(KST)으로 저장되며, API 응답 시 `+09:00` suffix를 붙여 반환한다 (`format_rows_datetime()`).
 
 ## API Endpoints
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | POST | `/api/auth/register` | No | Register user |
-| POST | `/api/auth/login` | No | Login, returns access+refresh tokens |
+| POST | `/api/auth/login` | No | Login (HttpOnly cookie 발급) |
 | POST | `/api/auth/refresh` | No | Rotate refresh token |
 | POST | `/api/auth/logout` | No | Invalidate refresh token in Redis |
 | GET | `/api/user/profile` | Yes | Get current user info |
@@ -80,13 +92,28 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 | POST | `/api/arduino/send-command` | Yes | Send command to Arduino, logs to `history` |
 | GET | `/api/arduino/dht-sensor` | Yes | Live DHT22 reading |
 | GET | `/api/arduino/dht-history` | Yes | Paginated `sensor_data` (`?page=&limit=`) |
+| GET | `/api/arduino/dht-history/today` | Yes | 오늘 온습도 전체 (ASC) |
+| GET | `/api/arduino/dht-history/seek` | Yes | timestamp 기준 페이지 번호 반환 |
 | GET | `/api/arduino/aircon-history` | Yes | Paginated `history` (`?page=&limit=`) |
+| GET | `/api/arduino/aircon-history/seek` | Yes | timestamp 기준 페이지 번호 반환 |
+| GET | `/api/arduino/dust-sensor` | Yes | 최신 미세먼지 1건 조회 |
+| GET | `/api/arduino/dust-history` | Yes | Paginated `dust_data` (`?page=&limit=`) |
+| GET | `/api/arduino/dust-history/today` | Yes | 오늘 미세먼지 전체 (ASC) |
+| GET | `/api/arduino/environment-history` | Yes | 온습도+미세먼지 5분 버킷 JOIN (`?page=&limit=`) |
 | GET | `/api/system/stats` | Yes | CPU/RAM/disk/network stats |
+
+## Sensor.ino (Wemos D1 / ESP8266)
+
+위치: `Sensor/Sensor.ino`
+
+- PMS7003 미세먼지 센서: SoftwareSerial TX→D7(GPIO13), RX→D6(GPIO12)
+- `/dust` 엔드포인트로 `pm1_0`, `pm2_5`, `pm10` 반환
+- 라즈베리파이 백엔드가 5분마다 이 엔드포인트를 폴링해서 DB에 저장
 
 ## Python Dependencies
 
 ```
-flask flask-cors pyserial Adafruit_DHT mysql-connector-python bcrypt PyJWT redis psutil
+flask flask-cors pyserial Adafruit_DHT mysql-connector-python bcrypt PyJWT redis psutil requests
 ```
 
 ## monitor.sh
