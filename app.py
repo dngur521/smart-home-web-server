@@ -345,6 +345,36 @@ def handle_get_dht_history():
             conn.close()
 
 
+@app.route("/api/arduino/dht-history/today", methods=["GET"])
+@login_required
+def handle_get_dht_history_today():
+    """오늘 날짜(로컬 시간 기준) 온습도 기록 전체 조회 — timestamp ASC"""
+    global db_pool
+    try:
+        today = datetime.now().date()
+        conn = db_pool.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        query = """
+            SELECT * FROM sensor_data
+            WHERE DATE(timestamp) = %s
+            ORDER BY timestamp ASC
+        """
+        cursor.execute(query, (today,))
+        rows = format_rows_datetime(cursor.fetchall())
+        return jsonify({"status": "success", "data": rows}), 200
+    except mysql.connector.Error as e:
+        print(f"Database error on /dht-history/today: {e}", file=sys.stderr)
+        return jsonify({"status": "error", "message": "Failed to fetch today's sensor data."}), 500
+    except Exception as e:
+        print(f"Error on /dht-history/today: {e}", file=sys.stderr)
+        return jsonify({"status": "error", "message": "Internal server error."}), 500
+    finally:
+        if "cursor" in locals() and cursor:
+            cursor.close()
+        if "conn" in locals() and conn:
+            conn.close()
+
+
 @app.route("/api/arduino/aircon-history", methods=["GET"])
 @login_required
 def handle_get_aircon_history():
