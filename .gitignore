@@ -1,6 +1,7 @@
 /dist
 /dist_old
 /dist_old1
+/dist_old2
 /venv
 .gitignore
 .vscode
