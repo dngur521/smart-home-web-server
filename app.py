@@ -537,6 +537,39 @@ def handle_aircon_history_seek():
     return jsonify({"status": "success", "page": page}), 200
 
 
+@app.route("/api/arduino/dust-history", methods=["GET"])
+@login_required
+def handle_get_dust_history():
+    """미세먼지 이력 조회 (페이지네이션)"""
+    global db_pool
+    try:
+        page  = int(request.args.get("page", 1))
+        limit = int(request.args.get("limit", 10))
+        offset = (page - 1) * limit
+
+        conn   = db_pool.get_connection()
+        cursor = conn.cursor(dictionary=True)
+
+        cursor.execute("SELECT * FROM dust_data ORDER BY id DESC LIMIT %s OFFSET %s", (limit, offset))
+        rows = format_rows_datetime(cursor.fetchall())
+
+        cursor.execute("SELECT COUNT(*) AS count FROM dust_data")
+        total = cursor.fetchone()["count"]
+
+        return jsonify({"status": "success", "data": rows, "total": total, "page": page, "limit": limit}), 200
+    except mysql.connector.Error as e:
+        print(f"DB error on /dust-history: {e}", file=sys.stderr)
+        return jsonify({"status": "error", "message": "Failed to fetch dust history."}), 500
+    except Exception as e:
+        print(f"Error on /dust-history: {e}", file=sys.stderr)
+        return jsonify({"status": "error", "message": "Internal server error."}), 500
+    finally:
+        if "cursor" in locals() and cursor:
+            cursor.close()
+        if "conn" in locals() and conn:
+            conn.close()
+
+
 @app.route("/api/sensor/dust", methods=["POST"])
 def receive_dust_data():
     """ESP8266이 5분마다 미세먼지 데이터를 전송하는 수신 엔드포인트 (인증 없음)"""
