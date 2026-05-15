@@ -4,24 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Flask-based smart home backend server designed to run on a **Raspberry Pi**. It consolidates what was previously a Node.js server and a separate Python hardware script into a single `app.py`. It serves a pre-built React app from `dist/` and exposes REST APIs for hardware control, sensor data, user auth, and system monitoring.
+Flask-based smart home backend server designed to run on a **Raspberry Pi 5**. It consolidates what was previously a Node.js server and a separate Python hardware script into a single `app.py`. It serves a pre-built React app from `dist/` and exposes REST APIs for hardware control, sensor data, user auth, and system monitoring.
 
 A **Wemos D1 (ESP8266)** module running `Sensor/Sensor.ino` connects to the local WiFi and serves PMS7003 dust sensor data at `http://<IP>/dust`. The Raspberry Pi backend polls this endpoint every 5 minutes.
 
 ## Running the Server
 
 ```bash
-# Start in background with timestamped log file under ./log/
-bash start_server.sh
+# pm2로 관리 (권장)
+pm2 start venv/bin/python3 --name backend -- app.py
+pm2 start /usr/local/bin/mjpg_streamer --name cctv -- \
+  -i "/usr/local/lib/mjpg-streamer/input_uvc.so -d /dev/video0 -r 1280x960 -f 30" \
+  -o "/usr/local/lib/mjpg-streamer/output_http.so -p 8080 -w /usr/local/share/mjpg-streamer/www"
+pm2 start /usr/local/bin/ttyd --name ttyd -- --port 7681 --writable --base-path /console-ws bash
 
-# Or run directly (foreground)
+# 직접 실행 (포그라운드)
 python3 app.py
 ```
 
 The server listens on `http://0.0.0.0:5000`.
 
 **Prerequisites before starting:**
-- MySQL running at `127.0.0.1:3306`, database `smart_home`, user `master`/`1234`
+- MariaDB running at `127.0.0.1:3306`, database `smart_home`, user `master`/`1234`
 - Redis running at `localhost:6379`
 - `SECRET_KEY` environment variable set (falls back to an insecure default)
 - React frontend built to `dist/` (the server serves `dist/index.html` for all non-API routes)
@@ -57,13 +61,15 @@ The entire backend is a **single file**: `app.py`. There are no modules or packa
 - **Refresh token**: UUID stored in Redis with key `refresh:<uuid>`, 7-day TTL; rotation on every use
 - **`login_required` decorator**: reads token from `Authorization: Bearer` header or `access_token_cookie` cookie
 
-### Hardware Dependencies (Raspberry Pi specific)
+### Hardware Dependencies (Raspberry Pi 5 specific)
 
-- **DHT22 sensor**: GPIO pin 26, read via `Adafruit_DHT` library
+- **DHT22 sensor**: GPIO pin 26 (물리 핀 37), `adafruit-circuitpython-dht` 라이브러리, `use_pulseio=False` 필수
+  - lgpio는 pip 설치 불가 → `sudo apt install python3-lgpio` 후 venv에 심볼릭 링크
 - **Arduino**: serial on `/dev/ttyUSB0` at 9600 baud
 - **Wemos D1 (ESP8266)**: WiFi HTTP server, polls `/dust` for PMS7003 data (`DUST_SENSOR_URL`)
+- **CCTV (Logitech C270)**: `/dev/video0`, mjpg_streamer MJPG 1280x960 30fps
 - **CPU temp**: `vcgencmd measure_temp` subprocess call
-- **SSD temp**: `sudo smartctl -A /dev/sda` subprocess call (requires passwordless sudo for `smartctl`)
+- **NVMe temp**: `sudo smartctl -A /dev/nvme0` (requires passwordless sudo for `smartctl`, `/etc/sudoers.d/smartctl`)
 
 ### Database Schema
 
@@ -97,7 +103,7 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 | GET | `/api/arduino/aircon-history` | Yes | Paginated `history` (`?page=&limit=`) |
 | GET | `/api/arduino/aircon-history/seek` | Yes | timestamp 기준 페이지 번호 반환 |
 | GET | `/api/arduino/dust-sensor` | Yes | 최신 미세먼지 1건 조회 |
-| GET | `/api/arduino/dust-history` | Yes | Paginated `dust_data` (`?page=&limit=`) |
+| GET | `/api/arduino/dust-history` | Yes | Paginated `dust_data` (`?page=&limit=`) / 범위 조회 (`?from=&to=`, ISO 8601 UTC) |
 | GET | `/api/arduino/dust-history/today` | Yes | 오늘 미세먼지 전체 (ASC) |
 | GET | `/api/arduino/environment-history` | Yes | 온습도+미세먼지 5분 버킷 JOIN (`?page=&limit=`) |
 | GET | `/api/system/stats` | Yes | CPU/RAM/disk/network stats |
@@ -113,7 +119,13 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 ## Python Dependencies
 
 ```
-flask flask-cors pyserial Adafruit_DHT mysql-connector-python bcrypt PyJWT redis psutil requests
+flask flask-cors pyserial adafruit-circuitpython-dht mysql-connector-python bcrypt PyJWT redis psutil requests
+```
+
+`lgpio`는 pip으로 설치 불가 (Pi 5). `sudo apt install python3-lgpio` 후 venv에 심볼릭 링크:
+```bash
+ln -s /usr/lib/python3/dist-packages/lgpio.py venv/lib/python3.13/site-packages/
+ln -s /usr/lib/python3/dist-packages/_lgpio.cpython-313-aarch64-linux-gnu.so venv/lib/python3.13/site-packages/
 ```
 
 ## monitor.sh

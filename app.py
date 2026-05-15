@@ -549,15 +549,29 @@ def handle_aircon_history_seek():
 @app.route("/api/arduino/dust-history", methods=["GET"])
 @login_required
 def handle_get_dust_history():
-    """미세먼지 이력 조회 (페이지네이션)"""
+    """미세먼지 이력 조회 (페이지네이션 or from/to 범위 조회)"""
     global db_pool
     try:
-        page  = int(request.args.get("page", 1))
-        limit = int(request.args.get("limit", 10))
-        offset = (page - 1) * limit
+        from_str = request.args.get("from")
+        to_str   = request.args.get("to")
 
         conn   = db_pool.get_connection()
         cursor = conn.cursor(dictionary=True)
+
+        if from_str and to_str:
+            kst = timezone(timedelta(hours=9))
+            from_kst = datetime.fromisoformat(from_str.replace("Z", "+00:00")).astimezone(kst).replace(tzinfo=None)
+            to_kst   = datetime.fromisoformat(to_str.replace("Z", "+00:00")).astimezone(kst).replace(tzinfo=None)
+            cursor.execute(
+                "SELECT * FROM dust_data WHERE timestamp >= %s AND timestamp <= %s ORDER BY timestamp ASC",
+                (from_kst, to_kst),
+            )
+            rows = format_rows_datetime(cursor.fetchall())
+            return jsonify({"status": "success", "data": rows}), 200
+
+        page   = int(request.args.get("page", 1))
+        limit  = int(request.args.get("limit", 10))
+        offset = (page - 1) * limit
 
         cursor.execute("SELECT * FROM dust_data ORDER BY id DESC LIMIT %s OFFSET %s", (limit, offset))
         rows = format_rows_datetime(cursor.fetchall())
