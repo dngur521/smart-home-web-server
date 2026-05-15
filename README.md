@@ -47,6 +47,8 @@ Wemos D1은 독립적인 WiFi HTTP 서버로 동작하며, 라즈베리파이 �
 
 테이블(`history`, `sensor_data`, `users`, `dust_data`)은 서버 시작 시 자동 생성된다.
 
+`cctv_config.json`은 `POST /api/system/cctv/config` 최초 호출 시 자동 생성된다. 없으면 기본값 `1280x960 @ 30fps`로 동작한다.
+
 ---
 
 ## 실행

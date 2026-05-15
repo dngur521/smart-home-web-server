@@ -41,11 +41,11 @@ The entire backend is a **single file**: `app.py`. There are no modules or packa
 
 | Lines | Purpose |
 |-------|---------|
-| 1–55 | Config constants and global `app`, `db_pool`, `redis_client`, `DUST_SENSOR_URL` |
+| 1–55 | Config constants and global `app`, `db_pool`, `redis_client`, `DUST_SENSOR_URL`, `CCTV_CONFIG_FILE`, `CCTV_SUPPORTED_OPTIONS` |
 | 56–180 | Auth helpers: `get_db_connection()`, `login_required` decorator, token helpers, cookie helpers |
 | 182–280 | Hardware: `send_command_to_arduino()`, `_schedule_next_5min()`, `read_and_save_dht_data_task()`, `read_and_save_dust_data_task()` |
 | 280–600 | Arduino/sensor API endpoints |
-| 600~ | React SPA catch-all, user auth/profile endpoints, system stats |
+| 600~ | React SPA catch-all, user auth/profile endpoints, system stats, CCTV config API |
 
 ### Background Tasks
 
