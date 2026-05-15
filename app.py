@@ -18,6 +18,7 @@ import psutil
 import redis  # Redis 라이브러리
 import requests
 import serial
+from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify, make_response, request, send_from_directory
 from flask_cors import CORS
 
@@ -1210,6 +1211,225 @@ def get_system_stats():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+# --- 에어컨 예약 ---
+# 인덱스 매핑 (chatbot.py의 _aircon_index와 동일)
+# 0=off, 1=on(raw), 2=power_cool
+# 3~15: 냉방 약풍 18~30도, 16~28: 냉방 중풍, 29~41: 냉방 강풍, 42~54: 냉방 자동풍
+# 55~67: 제습 약풍, 68~80: 제습 중풍, 81~93: 제습 강풍, 94~106: 제습 자동풍
+_SCHED_COOL_BASE  = {"low": 3,  "mid": 16, "high": 29, "auto": 42}
+_SCHED_DEHUM_BASE = {"low": 55, "mid": 68, "high": 81, "auto": 94}
+
+
+def _aircon_cmd_index(mode, wind, temperature):
+    """DB ENUM 값(mode: cool/dry, wind: auto/low/mid/high)으로 Arduino 인덱스 반환"""
+    t = max(0, min(12, int(temperature) - 18))
+    if mode == "cool":
+        return _SCHED_COOL_BASE.get(wind, _SCHED_COOL_BASE["auto"]) + t
+    if mode == "dry":
+        return _SCHED_DEHUM_BASE.get(wind, _SCHED_DEHUM_BASE["auto"]) + t
+    return 1
+
+
+def _execute_aircon_schedule(schedule):
+    """pending 상태인 예약 1건을 실행하고 status를 done으로 업데이트"""
+    sid = schedule["id"]
+    action = schedule["action"]
+
+    if action == "off":
+        result = send_command_to_arduino("SEND 0,5")
+        _record_history("SEND 0,5", result.get("arduinoResponse", ""))
+    else:
+        # 켜기: 먼저 전원 ON 후 2초 뒤 모드/온도/풍량 설정
+        on_result = send_command_to_arduino("SEND 1,5")
+        _record_history("SEND 1,5", on_result.get("arduinoResponse", ""))
+        time.sleep(2)
+        idx = _aircon_cmd_index(
+            schedule["mode"], schedule["wind"], schedule["temperature"]
+        )
+        cmd = f"SEND {idx},5"
+        result = send_command_to_arduino(cmd)
+        _record_history(cmd, result.get("arduinoResponse", ""))
+
+    conn = db_pool.get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE aircon_schedule SET status='done' WHERE id=%s", (sid,)
+    )
+    conn.commit()
+    cursor.close()
+    conn.close()
+    print(f"[scheduler] aircon_schedule id={sid} action={action} done")
+
+
+def _record_history(command, response):
+    """history 테이블에 에어컨 명령 기록"""
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO history (command, response, timestamp) VALUES (%s, %s, NOW())",
+            (command, response),
+        )
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except mysql.connector.Error as e:
+        print(f"[scheduler] history insert error: {e}", file=sys.stderr)
+
+
+def _check_aircon_schedules():
+    """1분마다 실행: pending 예약 중 scheduled_at <= now() 인 항목 처리"""
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT * FROM aircon_schedule WHERE status='pending' AND scheduled_at <= NOW()"
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        for row in rows:
+            try:
+                _execute_aircon_schedule(row)
+            except Exception as e:
+                print(f"[scheduler] error executing schedule id={row['id']}: {e}", file=sys.stderr)
+    except Exception as e:
+        print(f"[scheduler] _check_aircon_schedules error: {e}", file=sys.stderr)
+
+
+@app.route("/api/schedule/aircon", methods=["POST"])
+@login_required
+def create_aircon_schedule():
+    body = request.get_json(silent=True) or {}
+    action = body.get("action")
+    scheduled_at_str = body.get("scheduled_at")
+
+    if action not in ("on", "off"):
+        return jsonify({"status": "error", "message": "action은 'on' 또는 'off'여야 합니다."}), 400
+    if not scheduled_at_str:
+        return jsonify({"status": "error", "message": "scheduled_at은 필수입니다."}), 400
+
+    try:
+        scheduled_at = datetime.fromisoformat(scheduled_at_str)
+    except ValueError:
+        return jsonify({"status": "error", "message": "scheduled_at 형식이 올바르지 않습니다. (ISO 8601)"}), 400
+
+    temperature, mode, wind = None, None, None
+    if action == "on":
+        temperature = body.get("temperature")
+        mode = body.get("mode", "cool")
+        wind = body.get("wind", "auto")
+
+        if temperature is None or not (18 <= int(temperature) <= 30):
+            return jsonify({"status": "error", "message": "temperature는 18~30 사이의 값이어야 합니다."}), 400
+        if mode not in ("cool", "dry"):
+            return jsonify({"status": "error", "message": "mode는 'cool' 또는 'dry'여야 합니다."}), 400
+        if wind not in ("auto", "low", "mid", "high"):
+            return jsonify({"status": "error", "message": "wind는 'auto', 'low', 'mid', 'high' 중 하나여야 합니다."}), 400
+
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            """INSERT INTO aircon_schedule (action, scheduled_at, temperature, mode, wind)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (action, scheduled_at, temperature, mode, wind),
+        )
+        conn.commit()
+        new_id = cursor.lastrowid
+        cursor.execute("SELECT * FROM aircon_schedule WHERE id=%s", (new_id,))
+        row = format_rows_datetime([cursor.fetchone()])[0]
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "success", "data": row}), 201
+    except mysql.connector.Error as e:
+        print(f"DB error on POST /schedule/aircon: {e}", file=sys.stderr)
+        return jsonify({"status": "error", "message": "DB 오류가 발생했습니다."}), 500
+
+
+@app.route("/api/schedule/aircon", methods=["GET"])
+@login_required
+def list_aircon_schedules():
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT * FROM aircon_schedule ORDER BY scheduled_at ASC"
+        )
+        rows = format_rows_datetime(cursor.fetchall())
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "success", "data": rows}), 200
+    except mysql.connector.Error as e:
+        print(f"DB error on GET /schedule/aircon: {e}", file=sys.stderr)
+        return jsonify({"status": "error", "message": "DB 오류가 발생했습니다."}), 500
+
+
+@app.route("/api/schedule/aircon/bulk", methods=["DELETE"])
+@login_required
+def bulk_delete_aircon_schedules():
+    body = request.get_json(silent=True) or {}
+    status_filter = body.get("status")        # "cancelled" | "done" | None
+    older_than_days = body.get("older_than_days")  # int | None
+
+    if status_filter and status_filter not in ("cancelled", "done"):
+        return jsonify({"status": "error", "message": "status는 'cancelled' 또는 'done'만 허용됩니다."}), 400
+
+    conditions = ["status != 'pending'"]
+    params = []
+
+    if status_filter:
+        conditions.append("status = %s")
+        params.append(status_filter)
+
+    if older_than_days is not None:
+        try:
+            days = int(older_than_days)
+        except (TypeError, ValueError):
+            return jsonify({"status": "error", "message": "older_than_days는 정수여야 합니다."}), 400
+        conditions.append("scheduled_at < NOW() - INTERVAL %s DAY")
+        params.append(days)
+
+    where_clause = " AND ".join(conditions)
+
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(f"DELETE FROM aircon_schedule WHERE {where_clause}", params)
+        conn.commit()
+        deleted = cursor.rowcount
+        cursor.close()
+        conn.close()
+        return jsonify({"status": "success", "deleted": deleted}), 200
+    except mysql.connector.Error as e:
+        print(f"DB error on DELETE /schedule/aircon/bulk: {e}", file=sys.stderr)
+        return jsonify({"status": "error", "message": "DB 오류가 발생했습니다."}), 500
+
+
+@app.route("/api/schedule/aircon/<int:schedule_id>", methods=["DELETE"])
+@login_required
+def cancel_aircon_schedule(schedule_id):
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE aircon_schedule SET status='cancelled' WHERE id=%s AND status='pending'",
+            (schedule_id,),
+        )
+        conn.commit()
+        affected = cursor.rowcount
+        cursor.close()
+        conn.close()
+
+        if affected == 0:
+            return jsonify({"status": "error", "message": "예약을 찾을 수 없거나 이미 완료/취소된 상태입니다."}), 404
+        return jsonify({"status": "success"}), 200
+    except mysql.connector.Error as e:
+        print(f"DB error on DELETE /schedule/aircon/{schedule_id}: {e}", file=sys.stderr)
+        return jsonify({"status": "error", "message": "DB 오류가 발생했습니다."}), 500
+
+
 # --- CCTV 설정 헬퍼 ---
 def _read_cctv_config():
     try:
@@ -1318,6 +1538,18 @@ if __name__ == "__main__":
                 timestamp DATETIME NOT NULL
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS aircon_schedule (
+                id           INT AUTO_INCREMENT PRIMARY KEY,
+                action       ENUM('on', 'off') NOT NULL,
+                scheduled_at DATETIME NOT NULL,
+                temperature  INT,
+                mode         ENUM('cool', 'dry') DEFAULT 'cool',
+                wind         ENUM('auto', 'low', 'mid', 'high') DEFAULT 'auto',
+                status       ENUM('pending', 'done', 'cancelled') DEFAULT 'pending',
+                created_at   DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         # --- Redis 클라이언트 생성 ---
         # global redis_client
         redis_client = redis.StrictRedis(
@@ -1342,6 +1574,12 @@ if __name__ == "__main__":
     _schedule_next_5min(read_and_save_dht_data_task)
     _schedule_next_5min(read_and_save_dust_data_task)
     print("Background sensor threads started (DHT22 + Dust).")
+
+    # 에어컨 예약 스케줄러 — 1분마다 pending 항목 체크
+    scheduler = BackgroundScheduler(daemon=True)
+    scheduler.add_job(_check_aircon_schedules, "cron", second=0, id="aircon_scheduler")
+    scheduler.start()
+    print("Aircon schedule checker started (interval: 1 min).")
 
     # Flask 서버 실행 (Node.js 포트 5000번, 모든 IP에서 접근 가능)
     print(f"Starting server on http://0.0.0.0:{SERVER_PORT}")
