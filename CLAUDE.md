@@ -107,6 +107,8 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 | GET | `/api/arduino/dust-history/today` | Yes | 오늘 미세먼지 전체 (ASC) |
 | GET | `/api/arduino/environment-history` | Yes | 온습도+미세먼지 5분 버킷 JOIN (`?page=&limit=`) |
 | GET | `/api/system/stats` | Yes | CPU/RAM/disk/network stats |
+| GET | `/api/system/cctv/config` | Yes | 현재 CCTV 해상도/FPS 및 지원 옵션 조회 |
+| POST | `/api/system/cctv/config` | Yes | CCTV 해상도/FPS 변경 (`{"resolution":"1280x960","fps":30}`) — mjpg_streamer pm2 재시작, `cctv_config.json` 저장 |
 
 ## Sensor.ino (Wemos D1 / ESP8266)
 

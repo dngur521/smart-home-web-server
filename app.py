@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import json
 import os
 import re
 import subprocess
@@ -53,6 +54,30 @@ SERVER_PORT = 5000  # Node.js 서버 포트 기준
 DUST_SENSOR_URL = os.environ.get(
     "DUST_SENSOR_URL", "http://192.168.0.38/dust"
 )  # Wemos D1 IP로 변경
+
+# --- 설정: CCTV (mjpg_streamer) ---
+CCTV_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cctv_config.json")
+CCTV_SUPPORTED_OPTIONS = [
+    {"resolution": "160x120",  "fps": [30]},
+    {"resolution": "176x144",  "fps": [30]},
+    {"resolution": "320x176",  "fps": [30]},
+    {"resolution": "320x240",  "fps": [30]},
+    {"resolution": "352x288",  "fps": [30]},
+    {"resolution": "432x240",  "fps": [30]},
+    {"resolution": "544x288",  "fps": [30]},
+    {"resolution": "640x360",  "fps": [30]},
+    {"resolution": "640x480",  "fps": [30]},
+    {"resolution": "752x416",  "fps": [30]},
+    {"resolution": "800x448",  "fps": [30]},
+    {"resolution": "800x600",  "fps": [30]},
+    {"resolution": "864x480",  "fps": [30]},
+    {"resolution": "960x544",  "fps": [30]},
+    {"resolution": "960x720",  "fps": [30]},
+    {"resolution": "1024x576", "fps": [30]},
+    {"resolution": "1184x656", "fps": [30]},
+    {"resolution": "1280x720", "fps": [30]},
+    {"resolution": "1280x960", "fps": [30]},
+]
 
 # --- 설정: 쿠키 및 CORS ---
 # 개발 시 React 개발 서버 주소로 설정 (예: http://localhost:5173)
@@ -1183,6 +1208,65 @@ def get_system_stats():
     except Exception as e:
         print(f"Error in /api/system/stats: {e}", file=sys.stderr)
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+# --- CCTV 설정 헬퍼 ---
+def _read_cctv_config():
+    try:
+        with open(CCTV_CONFIG_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"resolution": "1280x960", "fps": 30}
+
+
+def _write_cctv_config(config):
+    with open(CCTV_CONFIG_FILE, "w") as f:
+        json.dump(config, f)
+
+
+@app.route("/api/system/cctv/config", methods=["GET"])
+@login_required
+def get_cctv_config():
+    config = _read_cctv_config()
+    return jsonify({
+        "status": "success",
+        "data": {
+            "current": config,
+            "supported": CCTV_SUPPORTED_OPTIONS,
+        }
+    }), 200
+
+
+@app.route("/api/system/cctv/config", methods=["POST"])
+@login_required
+def set_cctv_config():
+    body = request.get_json(silent=True) or {}
+    resolution = body.get("resolution")
+    fps = body.get("fps")
+
+    valid_pairs = {
+        (opt["resolution"], f) for opt in CCTV_SUPPORTED_OPTIONS for f in opt["fps"]
+    }
+    if (resolution, fps) not in valid_pairs:
+        return jsonify({"status": "error", "message": "지원하지 않는 해상도/FPS 조합입니다."}), 400
+
+    _write_cctv_config({"resolution": resolution, "fps": fps})
+
+    input_plugin = f"input_uvc.so -d /dev/video0 -r {resolution} -f {fps}"
+    output_plugin = "output_http.so -p 8080"
+    try:
+        subprocess.run(["pm2", "delete", "cctv"], check=True, capture_output=True)
+        subprocess.run(
+            ["pm2", "start", "mjpg_streamer", "--name", "cctv",
+             "--", "-i", input_plugin, "-o", output_plugin],
+            check=True, capture_output=True,
+        )
+        subprocess.run(["pm2", "save"], check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        err = e.stderr.decode(errors="replace") if e.stderr else str(e)
+        return jsonify({"status": "error", "message": f"CCTV 재시작 실패: {err}"}), 500
+
+    return jsonify({"status": "success", "data": {"resolution": resolution, "fps": fps}}), 200
 
 
 # --- 5. 서버 실행 (기존 server.py + server.js) ---

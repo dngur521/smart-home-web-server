@@ -99,6 +99,8 @@ python3 app.py
 | GET    | `/api/arduino/dust-history/today`     |  ✓   | 오늘 미세먼지 전체 (ASC)                    |
 | GET    | `/api/arduino/environment-history`    |  ✓   | 온습도+미세먼지 5분 버킷 통합 이력          |
 | GET    | `/api/system/stats`                   |  ✓   | CPU / RAM / 디스크 / 네트워크 통계          |
+| GET    | `/api/system/cctv/config`             |  ✓   | 현재 CCTV 해상도/FPS 및 지원 옵션 조회      |
+| POST   | `/api/system/cctv/config`             |  ✓   | CCTV 해상도/FPS 변경 (mjpg_streamer 재시작) |
 
 ---
 
