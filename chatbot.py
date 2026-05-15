@@ -715,9 +715,238 @@ def _dispatch_sensor_query(text, time_ctx):
         )
         return _summarize_sensor_rows(rows)
 
+# ── 에어컨 예약 ────────────────────────────────────────────────────
+
+def _parse_schedule_datetime(text: str):
+    """텍스트에서 예약 시각 추출. 반환: datetime or None"""
+    import re as _re
+    now = datetime.now()
+
+    # N시간 후
+    m = _re.search(r'(\d+)\s*시간\s*후', text)
+    if m:
+        return now + timedelta(hours=int(m.group(1)))
+
+    # N분 후
+    m = _re.search(r'(\d+)\s*분\s*후', text)
+    if m:
+        return now + timedelta(minutes=int(m.group(1)))
+
+    has_tomorrow = "내일" in text
+    base = (now + timedelta(days=1)).date() if has_tomorrow else now.date()
+    is_pm = any(k in text for k in ["오후", "저녁", "밤", "야간"])
+    is_am = any(k in text for k in ["오전", "아침"])
+
+    # N시 M분
+    m = _re.search(r'(\d{1,2})시\s*(\d{1,2})분', text)
+    if m:
+        hour, minute = int(m.group(1)), int(m.group(2))
+        if is_pm and hour < 12:
+            hour += 12
+        dt = datetime(base.year, base.month, base.day, hour % 24, minute)
+        if not has_tomorrow and dt <= now:
+            dt += timedelta(days=1)
+        return dt
+
+    # N시 (시간 단위 표현 '시간' 은 제외)
+    m = _re.search(r'(\d{1,2})시(?!\s*간)', text)
+    if m:
+        hour = int(m.group(1))
+        if is_pm and hour < 12:
+            hour += 12
+        dt = datetime(base.year, base.month, base.day, hour % 24, 0)
+        if not has_tomorrow and dt <= now:
+            dt += timedelta(days=1)
+        return dt
+
+    return None
+
+
+def _detect_schedule_intent(text: str):
+    """
+    예약 관련 의도 감지.
+    반환: ('create', args_dict) | ('list', {}) | ('cancel', args_dict) | None
+    """
+    import re as _re
+
+    # 목록 조회
+    if any(k in text for k in ["예약 목록", "예약 보여", "예약 확인", "예약된", "예약 있어", "예약 알려", "예약 현황"]):
+        return ("list", {})
+
+    # 취소
+    if "예약 취소" in text or ("취소" in text and "예약" in text):
+        m = _re.search(r'(\d+)\s*번', text)
+        sid = int(m.group(1)) if m else None
+        return ("cancel", {"id": sid})
+
+    # 생성: 미래 시각 + 에어컨 키워드 + 제어 동사
+    scheduled_at = _parse_schedule_datetime(text)
+    if scheduled_at is None:
+        return None
+    if not any(k in text for k in ["에어컨", "냉방", "제습", "에어콘"]):
+        return None
+    if not any(k in text for k in ["켜줘", "켜", "틀어줘", "꺼줘", "꺼", "예약해", "예약"]):
+        return None
+
+    # 끄기
+    if any(k in text for k in ["꺼줘", "끄기", "꺼 줘"]):
+        return ("create", {"action": "off", "scheduled_at": scheduled_at})
+
+    # 켜기 — 모드/온도/풍량
+    mode = "dry" if any(k in text for k in ["제습"]) else "cool"
+
+    if any(k in text for k in ["약풍", "약하게"]):
+        wind = "low"
+    elif any(k in text for k in ["중풍", "중간"]):
+        wind = "mid"
+    elif any(k in text for k in ["강풍", "강하게", "파워냉방", "파워"]):
+        wind = "high"
+    else:
+        wind = "auto"
+
+    m = _re.search(r'(\d+)\s*도', text)
+    temp = int(m.group(1)) if m and 18 <= int(m.group(1)) <= 30 else 25
+
+    return ("create", {
+        "action": "on",
+        "scheduled_at": scheduled_at,
+        "temperature": temp,
+        "mode": mode,
+        "wind": wind,
+    })
+
+
+def tool_create_aircon_schedule(args: dict) -> dict:
+    action       = args.get("action")
+    scheduled_at = args.get("scheduled_at")
+    temperature  = args.get("temperature")
+    mode         = args.get("mode")
+    wind         = args.get("wind")
+    try:
+        conn   = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "INSERT INTO aircon_schedule (action, scheduled_at, temperature, mode, wind)"
+            " VALUES (%s, %s, %s, %s, %s)",
+            (action, scheduled_at, temperature, mode, wind),
+        )
+        conn.commit()
+        new_id = cursor.lastrowid
+        cursor.execute("SELECT * FROM aircon_schedule WHERE id=%s", (new_id,))
+        row = cursor.fetchone()
+        cursor.close(); conn.close()
+        if row:
+            for k in ("scheduled_at", "created_at"):
+                if isinstance(row.get(k), datetime):
+                    row[k] = row[k].strftime("%Y-%m-%d %H:%M:%S")
+        return {"success": True, "schedule": row}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+def tool_list_aircon_schedules(_args: dict) -> dict:
+    rows = _db_query(
+        "SELECT * FROM aircon_schedule WHERE status='pending' ORDER BY scheduled_at ASC"
+    )
+    return {"schedules": rows}
+
+
+def tool_cancel_aircon_schedule(args: dict) -> dict:
+    sid = args.get("id")
+    try:
+        if sid:
+            conn = mysql.connector.connect(**DB_CONFIG)
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE aircon_schedule SET status='cancelled'"
+                " WHERE id=%s AND status='pending'",
+                (sid,),
+            )
+            conn.commit()
+            affected = cursor.rowcount
+            cursor.close(); conn.close()
+            if affected == 0:
+                return {"success": False, "message": f"{sid}번 예약을 찾을 수 없거나 이미 완료/취소 상태입니다."}
+            return {"success": True, "cancelled_id": sid}
+        else:
+            rows = _db_query(
+                "SELECT id, action, scheduled_at, temperature, mode"
+                " FROM aircon_schedule WHERE status='pending' ORDER BY scheduled_at ASC"
+            )
+            if not rows:
+                return {"success": False, "message": "취소할 예약이 없습니다."}
+            if len(rows) == 1:
+                only_id = rows[0]["id"]
+                conn = mysql.connector.connect(**DB_CONFIG)
+                cursor = conn.cursor()
+                cursor.execute("UPDATE aircon_schedule SET status='cancelled' WHERE id=%s", (only_id,))
+                conn.commit()
+                cursor.close(); conn.close()
+                return {"success": True, "cancelled_id": only_id}
+            return {"success": False, "pending_list": rows, "message": "취소할 예약 번호를 지정해 주세요."}
+    except Exception as e:
+        return {"success": False, "message": str(e)}
+
+
+def _fmt_sched_time(sat) -> str:
+    try:
+        dt = datetime.strptime(str(sat)[:19], "%Y-%m-%d %H:%M:%S") if isinstance(sat, str) else sat
+        return dt.strftime("%-m월 %-d일 %H:%M") if dt.minute else dt.strftime("%-m월 %-d일 %H시")
+    except Exception:
+        return str(sat)[:16]
+
+
+def _format_schedule_create(data: dict) -> str:
+    if not data.get("success"):
+        return f"예약 등록 실패: {data.get('message', '오류')}"
+    s = data.get("schedule", {})
+    tstr   = _fmt_sched_time(s.get("scheduled_at", ""))
+    action = s.get("action")
+    sid    = s.get("id")
+    if action == "off":
+        return f"{tstr}에 에어컨 끄기 예약 완료했습니다. (#{sid})"
+    ml   = {"cool": "냉방", "dry": "제습"}.get(s.get("mode", "cool"), "냉방")
+    wl   = {"auto": "자동", "low": "약풍", "mid": "중풍", "high": "강풍"}.get(s.get("wind", "auto"), "자동")
+    temp = s.get("temperature", 25)
+    return f"{tstr}에 에어컨 {ml} {temp}도 {wl} 켜기 예약 완료했습니다. (#{sid})"
+
+
+def _format_schedule_list(data: dict) -> str:
+    schedules = data.get("schedules", [])
+    if not schedules:
+        return "현재 대기 중인 예약이 없습니다."
+    lines = [f"대기 중인 예약 {len(schedules)}건입니다:"]
+    for s in schedules:
+        action = s.get("action")
+        if action == "off":
+            desc = "끄기"
+        else:
+            ml   = {"cool": "냉방", "dry": "제습"}.get(s.get("mode", "cool"), "냉방")
+            desc = f"켜기({ml} {s.get('temperature', 25)}도)"
+        lines.append(f"  [{s['id']}번] {_fmt_sched_time(s.get('scheduled_at',''))} — {desc}")
+    return "\n".join(lines)
+
+
+def _format_schedule_cancel(data: dict) -> str:
+    if not data.get("success"):
+        if "pending_list" in data:
+            rows  = data["pending_list"]
+            lines = ["취소할 예약 번호를 지정해 주세요. 대기 중인 예약:"]
+            for s in rows:
+                action = s.get("action")
+                desc   = "끄기" if action == "off" else f"켜기({s.get('temperature', 25)}도)"
+                lines.append(f"  [{s['id']}번] {_fmt_sched_time(s.get('scheduled_at',''))} — {desc}")
+            return "\n".join(lines)
+        return f"취소 실패: {data.get('message', '오류')}"
+    return f"{data.get('cancelled_id')}번 예약이 취소되었습니다."
+
+
 def _detect_aircon_command(text: str):
     """명령형 에어컨 제어 감지. 반환: dict(mode,fan,temp) 또는 None"""
     import re as _re
+    # 예약 시간 표현이 있으면 즉시 제어가 아님
+    if _parse_schedule_datetime(text) is not None:
+        return None
     # 의문/추론문 제외
     if any(k in text for k in ["할까", "해야", "켜야", "꺼야", "될까", "어때", "괜찮", "좋을까"]):
         return None
@@ -793,7 +1022,7 @@ _CASUAL_RESPONSES = {
     frozenset(["고마워", "고맙다", "감사해", "감사합니다", "고맙습니다", "땡큐"]): "천만에요! 더 필요한 것 있으면 말씀해 주세요.",
     frozenset(["안녕", "하이", "반가워"]): "안녕하세요! 온도·습도·에어컨 제어 무엇이든 도와드릴게요.",
     frozenset(["뭘 할 수 있", "무엇을 할 수 있", "뭐 할 수 있", "어떤 기능", "기능이 뭐", "뭐가 돼"]):
-        "온도·습도·미세먼지 조회, 에어컨 제어(냉방/제습/파워냉방), 시스템 상태 확인, 센서 이력 조회가 가능합니다.",
+        "온도·습도·미세먼지 조회, 에어컨 제어(냉방/제습/파워냉방), 에어컨 예약(N시간 후/N시에 켜기·끄기), 시스템 상태 확인, 센서 이력 조회가 가능합니다.",
 }
 
 def _detect_casual(text: str):
@@ -870,6 +1099,20 @@ def chat():
     if sensor_type:
         result = _fetch_current_sensors(sensor_type)
         return jsonify({"reply": _quick_format(result, is_current=True)})
+
+    # ── Fast path H: 에어컨 예약 ──
+    sched_intent = _detect_schedule_intent(user_message)
+    if sched_intent:
+        intent_type, args = sched_intent
+        if intent_type == "create":
+            result = tool_create_aircon_schedule(args)
+            return jsonify({"reply": _format_schedule_create(result)})
+        elif intent_type == "list":
+            result = tool_list_aircon_schedules(args)
+            return jsonify({"reply": _format_schedule_list(result)})
+        elif intent_type == "cancel":
+            result = tool_cancel_aircon_schedule(args)
+            return jsonify({"reply": _format_schedule_cancel(result)})
 
     # ── Fast path C: 에어컨 명령 (Python 파싱) ──
     aircon_cmd = _detect_aircon_command(user_message)
