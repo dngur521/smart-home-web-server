@@ -31,7 +31,7 @@ The server listens on `http://0.0.0.0:5000`.
 - React frontend built to `dist/` (the server serves `dist/index.html` for all non-API routes)
 - `DUST_SENSOR_URL` environment variable set to `http://<Wemos D1 IP>/dust`
 
-On startup, `app.py` auto-creates the `history`, `sensor_data`, `users`, `dust_data` tables if they don't exist.
+On startup, `app.py` auto-creates the `history`, `sensor_data`, `users`, `dust_data`, `aircon_schedule` tables if they don't exist.
 
 ## Architecture
 
@@ -49,11 +49,15 @@ The entire backend is a **single file**: `app.py`. There are no modules or packa
 
 ### Background Tasks
 
-두 백그라운드 태스크가 5분 정각(:00, :05, :10, …)마다 실행된다.
+두 백그라운드 스레드 태스크가 5분 정각(:00, :05, :10, …)마다 실행된다.
 
 - `read_and_save_dht_data_task()` — Raspberry Pi GPIO 26의 DHT22 센서 읽어 `sensor_data` 저장
 - `read_and_save_dust_data_task()` — Wemos D1의 `/dust` 엔드포인트 GET 후 `dust_data` 저장
 - `_schedule_next_5min(fn)` — 다음 5분 정각까지 남은 시간을 계산해 `threading.Timer`로 예약하는 공통 헬퍼
+
+APScheduler `BackgroundScheduler`가 **매분 정각**(cron `second=0`)에 실행된다.
+
+- `_check_aircon_schedules()` — `aircon_schedule`에서 `status='pending' AND scheduled_at <= NOW()` 항목을 조회해 Arduino로 명령 전송 후 `status='done'` 업데이트
 
 ### Authentication Flow
 
@@ -79,6 +83,7 @@ The entire backend is a **single file**: `app.py`. There are no modules or packa
 | `sensor_data` | `id`, `temperature`, `humidity`, `timestamp` |
 | `history` | `id`, `command`, `response`, `timestamp` |
 | `dust_data` | `id`, `pm1_0`, `pm2_5`, `pm10`, `timestamp` |
+| `aircon_schedule` | `id`, `action` ENUM(on/off), `scheduled_at`, `temperature` INT, `mode` ENUM(cool/dry), `wind` ENUM(auto/low/mid/high), `status` ENUM(pending/done/cancelled), `created_at` |
 
 New users are created with `is_active = FALSE`; an admin must activate accounts manually in the DB.
 
@@ -109,6 +114,10 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 | GET | `/api/system/stats` | Yes | CPU/RAM/disk/network stats |
 | GET | `/api/system/cctv/config` | Yes | 현재 CCTV 해상도/FPS 및 지원 옵션 조회 |
 | POST | `/api/system/cctv/config` | Yes | CCTV 해상도/FPS 변경 (`{"resolution":"1280x960","fps":30}`) — mjpg_streamer pm2 재시작, `cctv_config.json` 저장 |
+| POST | `/api/schedule/aircon` | Yes | 에어컨 예약 등록 (`action`, `scheduled_at`, `temperature`, `mode`, `wind`) |
+| GET | `/api/schedule/aircon` | Yes | 에어컨 예약 목록 전체 조회 (scheduled_at ASC) |
+| DELETE | `/api/schedule/aircon/:id` | Yes | 특정 예약 취소 (pending → cancelled) |
+| DELETE | `/api/schedule/aircon/bulk` | Yes | 예약 일괄 삭제 (`status`, `older_than_days` 필터, pending 제외) |
 
 ## Sensor.ino (Wemos D1 / ESP8266)
 
@@ -121,8 +130,33 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 ## Python Dependencies
 
 ```
-flask flask-cors pyserial adafruit-circuitpython-dht mysql-connector-python bcrypt PyJWT redis psutil requests
+flask flask-cors pyserial adafruit-circuitpython-dht mysql-connector-python bcrypt PyJWT redis psutil requests apscheduler
 ```
+
+### chatbot.py (AI 챗봇 서버, 포트 5001)
+
+ollama `qwen2.5:1.5b` 기반 스마트홈 AI 어시스턴트. **Python-first 아키텍처** — 데이터 조회는 Python이 직접 처리하고, LLM은 추론/대화만 담당.
+
+```
+pip install ollama
+```
+
+**Fast path 구조** (LLM 미호출):
+
+| Path | 트리거 | 동작 |
+|------|--------|------|
+| A | 시간 표현 + 센서 키워드 | DB 직접 조회 후 템플릿 응답 |
+| B | 현재 온도/습도/미세먼지 | 최신 레코드 조회 |
+| C | 에어컨 제어 키워드 | Python 파서 → 즉시 시리얼 전송 |
+| D/D2 | 환기/창문 / 에어컨 켜야 할까 | PM2.5/온도 규칙 기반 답변 |
+| E | 인사/감사 대화 | 고정 응답 |
+| F | 시스템 상태 키워드 | system stats 직접 조회 |
+| G | 에어컨 몇 번 켰어? | COUNT(*) 쿼리 |
+| H | 에어컨 예약 (N시간 후/N시에) | `aircon_schedule` DB 직접 조작 |
+| I | 에어컨 켜져 있어? | `_is_aircon_on()` 기반 상태 응답 |
+
+**시간 파싱** (`_detect_time_context`, `_parse_schedule_datetime`):
+- 지원: `YYYY년MM월DD일`, `YY년도MM월`, `N시간 전/후`, `N분 전/후`, `한/두/세 시간 전/후`, `방금`, `아까`, `어제`, `오늘`, `최근N시간`, `밤/저녁/오전 N시`, `내일 N시`
 
 `lgpio`는 pip으로 설치 불가 (Pi 5). `sudo apt install python3-lgpio` 후 venv에 심볼릭 링크:
 ```bash

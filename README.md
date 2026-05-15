@@ -9,13 +9,15 @@
 
 ## 기술 스택
 
-- **Python 3** + **Flask** — 웹 서버
+- **Python 3** + **Flask** — 웹 서버 (app.py: 5000, chatbot.py: 5001)
 - **MySQL** — 센서 데이터 / 제어 이력 / 사용자 저장
 - **Redis** — Refresh Token 저장 (7일 TTL, 로테이션)
 - **adafruit-circuitpython-dht** — DHT22 온습도 센서 (GPIO 26, `use_pulseio=False`)
 - **requests** — Wemos D1 미세먼지 센서 HTTP 폴링
 - **pyserial** — Arduino 시리얼 통신 (`/dev/ttyUSB0`)
 - **bcrypt / PyJWT** — 비밀번호 해싱 및 JWT 인증
+- **APScheduler** — 에어컨 예약 실행 (매분 정각 cron 트리거)
+- **ollama** (qwen2.5:1.5b) — AI 챗봇 (`chatbot.py`)
 
 ---
 
@@ -45,7 +47,7 @@ Wemos D1은 독립적인 WiFi HTTP 서버로 동작하며, 라즈베리파이 �
 | smartctl sudo   | `/etc/sudoers.d/smartctl`에 `kam5 ALL=(ALL) NOPASSWD: /usr/sbin/smartctl` 추가 |
 | lgpio           | `sudo apt install python3-lgpio` 후 venv에 심볼릭 링크 (Pi 5 필수) |
 
-테이블(`history`, `sensor_data`, `users`, `dust_data`)은 서버 시작 시 자동 생성된다.
+테이블(`history`, `sensor_data`, `users`, `dust_data`, `aircon_schedule`)은 서버 시작 시 자동 생성된다.
 
 `cctv_config.json`은 `POST /api/system/cctv/config` 최초 호출 시 자동 생성된다. 없으면 기본값 `1280x960 @ 30fps`로 동작한다.
 
@@ -103,6 +105,10 @@ python3 app.py
 | GET    | `/api/system/stats`                   |  ✓   | CPU / RAM / 디스크 / 네트워크 통계          |
 | GET    | `/api/system/cctv/config`             |  ✓   | 현재 CCTV 해상도/FPS 및 지원 옵션 조회      |
 | POST   | `/api/system/cctv/config`             |  ✓   | CCTV 해상도/FPS 변경 (mjpg_streamer 재시작) |
+| POST   | `/api/schedule/aircon`                |  ✓   | 에어컨 예약 등록 (`action`, `scheduled_at`, `temperature`, `mode`, `wind`) |
+| GET    | `/api/schedule/aircon`                |  ✓   | 에어컨 예약 목록 전체 조회                  |
+| DELETE | `/api/schedule/aircon/:id`            |  ✓   | 특정 예약 취소 (status → cancelled)         |
+| DELETE | `/api/schedule/aircon/bulk`           |  ✓   | 예약 일괄 삭제 (`status`, `older_than_days` 필터) |
 
 ---
 
@@ -118,12 +124,13 @@ JWT를 **HttpOnly 쿠키**로 관리한다.
 
 ## 데이터베이스 스키마
 
-| 테이블        | 컬럼                                                                  |
-| ------------- | --------------------------------------------------------------------- |
-| `users`       | `id`, `username` (unique), `password_hash`, `is_active`, `created_at` |
-| `sensor_data` | `id`, `temperature`, `humidity`, `timestamp`                          |
-| `history`     | `id`, `command`, `response`, `timestamp`                              |
-| `dust_data`   | `id`, `pm1_0`, `pm2_5`, `pm10`, `timestamp`                           |
+| 테이블           | 컬럼                                                                  |
+| ---------------- | --------------------------------------------------------------------- |
+| `users`          | `id`, `username` (unique), `password_hash`, `is_active`, `created_at` |
+| `sensor_data`    | `id`, `temperature`, `humidity`, `timestamp`                          |
+| `history`        | `id`, `command`, `response`, `timestamp`                              |
+| `dust_data`      | `id`, `pm1_0`, `pm2_5`, `pm10`, `timestamp`                           |
+| `aircon_schedule`| `id`, `action` (on/off), `scheduled_at`, `temperature`, `mode` (cool/dry), `wind` (auto/low/mid/high), `status` (pending/done/cancelled), `created_at` |
 
 ---
 
@@ -150,5 +157,6 @@ bash monitor.sh
 | 이름 | 역할 | 포트 |
 | ---- | ---- | ---- |
 | `backend` | Flask API 서버 | 5000 |
+| `chatbot` | AI 챗봇 서버 (`chatbot.py`, ollama qwen2.5:1.5b) | 5001 |
 | `cctv` | mjpg_streamer (Logitech C270, MJPG 1280x960 30fps) | 8080 |
 | `ttyd` | 웹 콘솔 (`--writable --base-path /console-ws`) | 7681 |

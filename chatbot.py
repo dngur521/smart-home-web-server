@@ -536,9 +536,9 @@ def _detect_current_sensor(text):
     if any(k in text for k in ["에어컨", "냉방", "제습", "파워", "cpu", "디스크", "서버", "시스템", "켜줘", "꺼줘", "켜 줘", "꺼 줘"]):
         return None
 
-    has_temp  = any(k in text for k in ["온도", "기온", "몇도", "몇 도"])
-    has_hum   = any(k in text for k in ["습도"])
-    has_dust  = any(k in text.lower() for k in ["미세먼지", "먼지", "pm", "오염"])
+    has_temp  = any(k in text for k in ["온도", "기온", "몇도", "몇 도", "덥냐", "덥나", "춥냐", "춥나"])
+    has_hum   = any(k in text for k in ["습도", "습해", "습하", "눅눅"])
+    has_dust  = any(k in text.lower() for k in ["미세먼지", "먼지", "pm", "오염", "대기질", "공기질", "공기"])
 
     if has_dust:            return "dust"
     if has_temp and has_hum: return "temp_humidity"
@@ -621,6 +621,12 @@ def _detect_time_context(text):
     if m:
         return ("point", now - timedelta(hours=int(m.group(1))))
 
+    # 한/두/세 시간 전 (한글 숫자)
+    _ko = {"한": 1, "두": 2, "세": 3, "네": 4, "다섯": 5, "여섯": 6}
+    m = re.search(r'(한|두|세|네|다섯|여섯)\s*시간\s*전', text)
+    if m:
+        return ("point", now - timedelta(hours=_ko[m.group(1)]))
+
     # N분 전
     m = re.search(r'(\d+)\s*분\s*전', text)
     if m:
@@ -629,6 +635,10 @@ def _detect_time_context(text):
     # 아까
     if "아까" in text:
         return ("point", now - timedelta(hours=1))
+
+    # 방금 (약 10분 전)
+    if "방금" in text:
+        return ("point", now - timedelta(minutes=10))
 
     # 어제 / 하루 전
     if "어제" in text or "하루 전" in text:
@@ -655,7 +665,7 @@ def _is_sensor_query(text):
     system_kw = ["cpu", "램", "메모리", "디스크", "시스템", "서버"]
     if any(k in text for k in aircon_kw + system_kw):
         return False
-    sensor_kw = ["온도", "기온", "습도", "미세먼지", "먼지", "pm", "오염", "센서", "날씨"]
+    sensor_kw = ["온도", "기온", "습도", "습해", "습하", "미세먼지", "먼지", "pm", "오염", "대기질", "공기질", "공기", "센서", "날씨"]
     return any(k in text.lower() for k in sensor_kw)
 
 
@@ -726,6 +736,12 @@ def _parse_schedule_datetime(text: str):
     m = _re.search(r'(\d+)\s*시간\s*후', text)
     if m:
         return now + timedelta(hours=int(m.group(1)))
+
+    # 한/두/세 시간 후 (한글 숫자)
+    _ko_hr = {"한": 1, "두": 2, "세": 3, "네": 4, "다섯": 5, "여섯": 6}
+    m = _re.search(r'(한|두|세|네|다섯|여섯)\s*시간\s*후', text)
+    if m:
+        return now + timedelta(hours=_ko_hr[m.group(1)])
 
     # N분 후
     m = _re.search(r'(\d+)\s*분\s*후', text)
@@ -947,6 +963,9 @@ def _detect_aircon_command(text: str):
     # 예약 시간 표현이 있으면 즉시 제어가 아님
     if _parse_schedule_datetime(text) is not None:
         return None
+    # 상태 확인 문맥 제외 ("켜져 있어?", "꺼져 있어?" 등)
+    if any(k in text for k in ["켜져 있", "꺼져 있", "켜져있", "꺼져있"]):
+        return None
     # 의문/추론문 제외
     if any(k in text for k in ["할까", "해야", "켜야", "꺼야", "될까", "어때", "괜찮", "좋을까"]):
         return None
@@ -1152,6 +1171,12 @@ def chat():
     if any(k in user_message.lower() for k in _sys_direct_kw):
         result = tool_get_system_stats({})
         return jsonify({"reply": _format_system_stats(result)})
+
+    # ── Fast path I: 에어컨 켜짐 상태 조회 ──
+    if "에어컨" in user_message and any(k in user_message for k in ["켜져", "꺼져", "작동 중", "상태 어", "켜있", "꺼있"]):
+        is_on = _is_aircon_on()
+        reply = "에어컨이 현재 켜져 있는 것으로 보입니다." if is_on else "에어컨이 현재 꺼져 있는 것으로 보입니다."
+        return jsonify({"reply": reply})
 
     # ── LLM path: 에어컨 제어·시스템 상태·추론·대화 ─────────────────────────
     now           = datetime.now()
