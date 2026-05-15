@@ -8,7 +8,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
-import Adafruit_DHT
+import board
+import adafruit_dht
 import bcrypt  # 비밀번호 해싱/검증
 import jwt  # JWT (JSON Web Token) 처리
 import mysql.connector
@@ -44,8 +45,8 @@ DB_CONFIG = {
 }
 
 # --- 설정: Python (server.py) 기준 하드웨어 설정 ---
-SENSOR_TYPE = Adafruit_DHT.DHT22
 SENSOR_PIN = 26
+dht_device = adafruit_dht.DHT22(board.D26, use_pulseio=False)
 SERIAL_PORT = "/dev/ttyUSB0"
 BAUD_RATE = 9600
 SERVER_PORT = 5000  # Node.js 서버 포트 기준
@@ -206,8 +207,16 @@ def send_command_to_arduino(command):
 def read_and_save_dht_data_task():
     """5분마다 온습도 센서 데이터를 읽고 원격 DB에 저장하는 백그라운드 작업"""
     global db_pool
+    temperature, humidity = None, None
+    for _ in range(5):
+        try:
+            temperature = dht_device.temperature
+            humidity = dht_device.humidity
+            if temperature is not None and humidity is not None:
+                break
+        except RuntimeError:
+            time.sleep(2)
     try:
-        humidity, temperature = Adafruit_DHT.read_retry(SENSOR_TYPE, SENSOR_PIN)
         if humidity is not None and temperature is not None:
             temperature = round(temperature, 1)
             humidity = round(humidity, 1)
@@ -336,21 +345,21 @@ def handle_send_command():
 @login_required
 def handle_get_sensor_data():
     """실시간 온습도 데이터를 센서에서 직접 읽어 반환"""
-    try:
-        humidity, temperature = Adafruit_DHT.read_retry(SENSOR_TYPE, SENSOR_PIN)
-        if humidity is not None and temperature is not None:
-            temperature = round(temperature, 1)
-            humidity = round(humidity, 1)
-            return jsonify(
-                {"temperature": temperature, "humidity": humidity, "status": "success"}
-            )
-        else:
-            return jsonify(
-                {"status": "error", "message": "Failed to retrieve data from sensor."}
-            ), 500
-    except Exception as e:
-        print(f"Sensor read error on /dht-sensor: {e}", file=sys.stderr)
-        return jsonify({"status": "error", "message": f"Sensor read error: {e}"}), 500
+    temperature, humidity = None, None
+    for _ in range(5):
+        try:
+            temperature = dht_device.temperature
+            humidity = dht_device.humidity
+            if temperature is not None and humidity is not None:
+                break
+        except RuntimeError:
+            time.sleep(2)
+    if humidity is not None and temperature is not None:
+        return jsonify(
+            {"temperature": round(temperature, 1), "humidity": round(humidity, 1), "status": "success"}
+        )
+    print(f"Sensor read error on /dht-sensor: DHT22 read failed after retries", file=sys.stderr)
+    return jsonify({"status": "error", "message": "Failed to retrieve data from sensor."}), 500
 
 
 @app.route("/api/arduino/dht-history", methods=["GET"])
@@ -1109,7 +1118,7 @@ def get_system_stats():
         mem_percent = mem.percent  # (이미 psutil이 계산해줌)
 
         # 4. SSD 온도 (smartctl)
-        ssd_temp = get_ssd_temp("sda")  # 쉘 스크립트의 "sda" 기준
+        ssd_temp = get_ssd_temp("nvme0")
 
         # 5. Disk I/O (psutil, 1초간 측정)
         disk_io_start = psutil.disk_io_counters()

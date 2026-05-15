@@ -2,6 +2,9 @@ sudo nano /etc/systemd/system/cctv-local.service
 sudo systemctl daemon-reload
 sudo systemctl restart cctv-local.service
 
+source venv/bin/activate
+pip install flask flask-cors pyserial Adafruit_DHT mysql-connector-python bcrypt PyJWT redis psutil requests
+
 pm2 status
 pm2 logs backend
 pm2 restart backend
