@@ -10,3 +10,5 @@ cctv_config.json
 .lgd-nfy0
 123.txt
 .claude
+*.png
+__pycache__
