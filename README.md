@@ -29,7 +29,7 @@
 | DHT22 | 온습도 센서 (GPIO 26, 물리 핀 37) |
 | Arduino (USB) | 에어컨 IR 제어 (`/dev/arduino`, 영구 연결 + Lock) |
 | TENT6000 빛센서 | 에어컨 켜짐 감지 (Arduino A0, threshold ≥ 20) |
-| Logitech C270 (USB) | CCTV 웹캠 (`/dev/video1`, MJPG 1280x960 30fps, USB 재연결 시 번호 변동 가능) |
+| Logitech C270 (USB) | CCTV 웹캠 (`/dev/cctv`, udev 고정 심볼릭 링크, MJPG 1280x960 30fps) |
 | Arduino 클론 CH340 (USB) | Pan-Tilt 서보 제어 (`/dev/ttyUSB0`, `Servo/Servo.ino`) |
 | Wemos D1 (ESP8266) + PMS7003 | WiFi 미세먼지 센서 모듈 (`Sensor/Sensor.ino`) |
 
