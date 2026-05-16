@@ -235,18 +235,35 @@ def clear_token_cookies(response):
 
 # --- 1. 하드웨어 제어 함수 ---
 def send_command_to_arduino(command):
-    """아두이노로 명령을 전송하고 응답을 받습니다."""
+    """아두이노로 명령을 전송하고 응답을 DB에 기록한 뒤 반환합니다."""
     try:
         response = _arduino_cmd(command)
         print(f"Arduino command: {command}, response: {response}")
-        return {
-            "status": "success",
-            "message": "Command sent to Arduino.",
-            "arduinoResponse": response,
-        }
     except Exception as e:
         print(f"Serial Error: {e}", file=sys.stderr)
         return {"status": "error", "message": f"Error communicating with Arduino: {e}"}
+
+    try:
+        conn = db_pool.get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO history (command, response, timestamp) VALUES (%s, %s, NOW())",
+            (command, response),
+        )
+        conn.commit()
+    except mysql.connector.Error as e:
+        print(f"DB error saving history: {e}", file=sys.stderr)
+    finally:
+        if "cursor" in locals() and cursor:
+            cursor.close()
+        if "conn" in locals() and conn:
+            conn.close()
+
+    return {
+        "status": "success",
+        "message": "Command sent to Arduino.",
+        "arduinoResponse": response,
+    }
 
 
 # --- 2. 백그라운드 센서 데이터 저장 ---
@@ -357,34 +374,8 @@ def handle_send_command():
 
     print(f"Received command from Client: {command_to_send}")
 
-    # 1. 아두이노로 명령 전송
     result = send_command_to_arduino(command_to_send)
-
-    # 2. 원격 DB에 히스토리 삽입
-    try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        query = (
-            "INSERT INTO history (command, response, timestamp) VALUES (%s, %s, NOW())"
-        )
-        cursor.execute(
-            query, (command_to_send, result.get("arduinoResponse", "No response"))
-        )
-        conn.commit()
-    except mysql.connector.Error as e:
-        print(f"Database error on /send-command: {e}", file=sys.stderr)
-        # 아두이노 제어는 성공했을 수 있으므로, DB 에러를 포함하여 응답
-        result["db_status"] = "error"
-        result["db_message"] = str(e)
-        return jsonify(result), 500
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-    # 3. 결과를 JSON 형식으로 반환
-    return jsonify(result)
+    return jsonify(result), 200 if result["status"] == "success" else 500
 
 
 @app.route("/api/arduino/dht-sensor", methods=["GET"])
