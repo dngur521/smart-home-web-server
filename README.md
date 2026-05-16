@@ -14,7 +14,7 @@
 - **Redis** — Refresh Token 저장 (7일 TTL, 로테이션)
 - **adafruit-circuitpython-dht** — DHT22 온습도 센서 (GPIO 26, `use_pulseio=False`)
 - **requests** — Wemos D1 미세먼지 센서 HTTP 폴링
-- **pyserial** — Arduino 시리얼 통신 (`/dev/ttyUSB0`)
+- **pyserial** — Arduino 시리얼 통신 (`/dev/arduino`, udev 고정 심볼릭 링크)
 - **bcrypt / PyJWT** — 비밀번호 해싱 및 JWT 인증
 - **APScheduler** — 에어컨 예약 실행 (매분 정각 cron 트리거)
 - **google-genai** (gemini-2.5-flash) — AI 챗봇 (`chatbot.py`, 무료 API)
@@ -27,7 +27,7 @@
 | ---- | ---- |
 | 라즈베리파이 5 | 백엔드 서버 실행 |
 | DHT22 | 온습도 센서 (GPIO 26, 물리 핀 37) |
-| Arduino (USB) | 에어컨 IR 제어 (`/dev/ttyUSB0`, 영구 연결 + Lock) |
+| Arduino (USB) | 에어컨 IR 제어 (`/dev/arduino`, 영구 연결 + Lock) |
 | TENT6000 빛센서 | 에어컨 켜짐 감지 (Arduino A0, threshold ≥ 20) |
 | Logitech C270 (USB) | CCTV 웹캠 (`/dev/video0`, MJPG 1280x960 30fps) |
 | Wemos D1 (ESP8266) + PMS7003 | WiFi 미세먼지 센서 모듈 (`Sensor/Sensor.ino`) |
@@ -164,4 +164,4 @@ bash monitor.sh
 | `cctv` | mjpg_streamer (Logitech C270, MJPG 1280x960 30fps) | 8080 |
 | `ttyd` | 웹 콘솔 (`--writable --base-path /console-ws`) | 7681 |
 
-> **Arduino 업로드 시 주의**: app.py가 `/dev/ttyUSB0`를 영구 점유하므로, 업로드 전 반드시 `pm2 stop backend` → 업로드 완료 후 `pm2 start backend`.
+> **Arduino 업로드 시 주의**: app.py가 `/dev/arduino`를 영구 점유하므로, 업로드 전 반드시 `pm2 stop backend` → 업로드 완료 후 `pm2 start backend`.

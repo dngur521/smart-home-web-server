@@ -69,7 +69,8 @@ APScheduler `BackgroundScheduler`가 **매분 정각**(cron `second=0`)에 실�
 
 - **DHT22 sensor**: GPIO pin 26 (물리 핀 37), `adafruit-circuitpython-dht` 라이브러리, `use_pulseio=False` 필수
   - lgpio는 pip 설치 불가 → `sudo apt install python3-lgpio` 후 venv에 심볼릭 링크
-- **Arduino**: serial on `/dev/ttyUSB0` at 9600 baud — **영구 연결(persistent)** + `threading.Lock` 동기화
+- **Arduino**: serial on `/dev/arduino` at 9600 baud — **영구 연결(persistent)** + `threading.Lock` 동기화
+  - udev 룰 `/etc/udev/rules.d/99-arduino.rules`로 `/dev/arduino` 고정 심볼릭 링크 (VID:2341/PID:0043, Arduino Uno 정품). ttyACM 번호 변동 무관.
   - `_arduino_cmd(command)` 헬퍼가 연결 관리. 첫 연결 시 2s 대기, 이후 ~20–50ms
   - **Arduino 업로드 시 반드시 `pm2 stop backend` 먼저 실행** (포트 점유로 업로드 실패)
 - **TENT6000 빛센서**: Arduino A0 핀 연결. `LIGHT` 명령으로 5회 median 샘플 반환 (50ms). threshold ≥ 20 = ON

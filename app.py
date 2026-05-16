@@ -49,7 +49,7 @@ DB_CONFIG = {
 # --- 설정: Python (server.py) 기준 하드웨어 설정 ---
 SENSOR_PIN = 26
 dht_device = adafruit_dht.DHT22(board.D26, use_pulseio=False)
-SERIAL_PORT = "/dev/ttyUSB0"
+SERIAL_PORT = "/dev/arduino"
 BAUD_RATE = 9600
 
 _serial_conn: serial.Serial | None = None
