@@ -3,6 +3,7 @@
 /dist_old1
 /dist_old2
 /venv
+.env
 .gitignore
 .vscode
 */build

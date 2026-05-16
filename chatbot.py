@@ -6,9 +6,13 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
+from google import genai
+from google.genai import types as genai_types
 import mysql.connector
-import ollama
 import psutil
+from dotenv import load_dotenv
+
+load_dotenv()
 import serial
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -23,7 +27,9 @@ DB_CONFIG = {
 }
 SERIAL_PORT = "/dev/ttyUSB0"
 BAUD_RATE = 9600
-OLLAMA_MODEL = "qwen2.5:1.5b"
+GEMINI_MODEL    = "gemini-2.5-flash"
+GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
+_gemini_client  = genai.Client(api_key=GEMINI_API_KEY)
 FRONTEND_ORIGIN = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173")
 
 app = Flask(__name__)
@@ -225,7 +231,11 @@ def tool_get_aircon_history(args):
 
 def _send_serial(ser, command):
     ser.write(f"{command}\n".encode("utf-8"))
-    response = ser.readline().decode("utf-8").strip()
+    raw = ser.readline()
+    try:
+        response = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        response = raw.decode("latin-1").strip()
     _db_insert(
         "INSERT INTO history (command, response, timestamp) VALUES (%s, %s, %s)",
         (command, response, datetime.now()),
@@ -238,6 +248,7 @@ def tool_control_aircon(args):
     temp = args.get("temp", 25)
     index   = _aircon_index(mode, fan, temp)
     command = f"SEND {index},5"
+    ser = None
     try:
         ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=3)
         time.sleep(2)
@@ -245,13 +256,11 @@ def tool_control_aircon(args):
         if mode == "off":
             response = _send_serial(ser, command)
         else:
-            # 꺼져 있을 때만 전원 ON 먼저 전송
             if not _is_aircon_on():
                 _send_serial(ser, "SEND 1,5")
                 time.sleep(1)
             response = _send_serial(ser, command)
 
-        ser.close()
         mode_label = {"off": "전원 끄기", "cool": "냉방", "dehumidify": "제습", "power_cool": "파워냉방"}.get(mode, mode)
         fan_label  = {"weak": "약풍", "medium": "중풍", "strong": "강풍", "auto": "자동풍"}.get(fan, fan)
         return {
@@ -264,6 +273,9 @@ def tool_control_aircon(args):
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
+    finally:
+        if ser and ser.is_open:
+            ser.close()
 
 def tool_get_system_stats(_args):
     try:
@@ -480,6 +492,56 @@ TOOLS_LLM = [
     },
 ]
 
+_GEMINI_TOOLS = [genai_types.Tool(
+    function_declarations=[
+        genai_types.FunctionDeclaration(
+            name="control_aircon",
+            description="에어컨을 제어합니다. 전원 끄기, 냉방, 제습, 파워냉방 지원.",
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "mode": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        enum=["off", "cool", "dehumidify", "power_cool"],
+                        description="off=전원끄기, cool=냉방, dehumidify=제습, power_cool=파워냉방",
+                    ),
+                    "fan": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        enum=["weak", "medium", "strong", "auto"],
+                        description="약풍=weak 중풍=medium 강풍=strong 자동=auto (기본 auto)",
+                    ),
+                    "temp": genai_types.Schema(
+                        type=genai_types.Type.INTEGER,
+                        description="희망 온도 18~30. 미언급 시 25.",
+                    ),
+                },
+                required=["mode"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="get_system_stats",
+            description="라즈베리파이 시스템 상태(CPU 온도/사용률, RAM, 디스크)를 조회합니다.",
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={},
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="get_aircon_history",
+            description="최근 에어컨 제어 이력을 조회합니다.",
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "limit": genai_types.Schema(
+                        type=genai_types.Type.INTEGER,
+                        description="조회할 이력 수 (기본 10)",
+                    ),
+                },
+            ),
+        ),
+    ]
+)]
+
 SYSTEM_PROMPT = """당신은 스마트홈 AI 어시스턴트입니다. 반드시 한국어로만, 1~2문장으로만 답하세요.
 현재 센서: {sensor_context}
 오늘: {today} | 어제: {yesterday}
@@ -536,8 +598,12 @@ def _detect_current_sensor(text):
     if any(k in text for k in ["에어컨", "냉방", "제습", "파워", "cpu", "디스크", "서버", "시스템", "켜줘", "꺼줘", "켜 줘", "꺼 줘"]):
         return None
 
-    has_temp  = any(k in text for k in ["온도", "기온", "몇도", "몇 도", "덥냐", "덥나", "춥냐", "춥나"])
-    has_hum   = any(k in text for k in ["습도", "습해", "습하", "눅눅"])
+    # 날씨 통합 쿼리 → 온습도 동시 반환
+    if any(k in text for k in ["날씨 어때", "날씨가 어때", "날씨는 어때"]):
+        return "temp_humidity"
+
+    has_temp  = any(k in text for k in ["온도", "기온", "몇도", "몇 도", "덥냐", "덥나", "춥냐", "춥나", "실온"])
+    has_hum   = any(k in text for k in ["습도", "습해", "습하", "눅눅", "건조해", "건조한", "건조하다", "습도 높"])
     has_dust  = any(k in text.lower() for k in ["미세먼지", "먼지", "pm", "오염", "대기질", "공기질", "공기"])
 
     if has_dust:            return "dust"
@@ -640,21 +706,62 @@ def _detect_time_context(text):
     if "방금" in text:
         return ("point", now - timedelta(minutes=10))
 
+    # N일 전 (숫자)
+    m = re.search(r'(\d+)\s*일\s*전', text)
+    if m:
+        return ("point", now - timedelta(days=int(m.group(1))))
+
+    # 이틀 전 / 그저께 / 엊그제 / 그제
+    if any(k in text for k in ["이틀 전", "이틀전", "그저께", "엊그제", "그제"]):
+        return ("point", now - timedelta(days=2))
+
+    # 사흘 전
+    if any(k in text for k in ["사흘 전", "사흘전"]):
+        return ("point", now - timedelta(days=3))
+
+    # 일주일 전 / 한 주 전
+    if any(k in text for k in ["일주일 전", "일주일전", "1주일 전", "1주 전", "한 주 전", "한주전"]):
+        return ("point", now - timedelta(weeks=1))
+
+    # 지난 달 / 저번 달 / 전달
+    if any(k in text for k in ["지난 달", "지난달", "저번 달", "저번달", "전달", "전 달", "지난월"]):
+        y, mo = (now.year, now.month - 1) if now.month > 1 else (now.year - 1, 12)
+        return ("range", datetime(y, mo, 1), datetime(now.year, now.month, 1))
+
+    # 이번 달
+    if any(k in text for k in ["이번 달", "이번달", "이번월"]):
+        return ("range", datetime(now.year, now.month, 1), now)
+
+    # 지난 주 / 저번 주
+    if any(k in text for k in ["지난 주", "지난주", "저번 주", "저번주", "전주", "전 주"]):
+        mon = today_start - timedelta(days=now.weekday())
+        return ("range", mon - timedelta(weeks=1), mon)
+
+    # 이번 주
+    if any(k in text for k in ["이번 주", "이번주"]):
+        mon = today_start - timedelta(days=now.weekday())
+        return ("range", mon, now)
+
     # 어제 / 하루 전
     if "어제" in text or "하루 전" in text:
         yesterday_start = today_start - timedelta(days=1)
-        if any(k in text for k in ["평균", "최고", "최저", "전체", "통계", "얼마"]):
+        if any(k in text for k in ["평균", "최고", "최저", "전체", "통계", "얼마", "변화", "추이"]):
             return ("range", yesterday_start, today_start)
         return ("point", now - timedelta(days=1))
 
-    # 오늘 + 통계 키워드
-    if "오늘" in text and any(k in text for k in ["평균", "최고", "최저", "전체", "통계"]):
+    # 오늘 + 통계/변화 키워드
+    if "오늘" in text and any(k in text for k in ["평균", "최고", "최저", "전체", "통계", "변화", "추이"]):
         return ("range", today_start, now)
 
     # 최근 N시간
     m = re.search(r'최근\s*(\d+)\s*시간', text)
     if m:
         return ("range", now - timedelta(hours=int(m.group(1))), now)
+
+    # 최근 N일
+    m = re.search(r'최근\s*(\d+)\s*일', text)
+    if m:
+        return ("range", now - timedelta(days=int(m.group(1))), now)
 
     return None
 
@@ -665,7 +772,7 @@ def _is_sensor_query(text):
     system_kw = ["cpu", "램", "메모리", "디스크", "시스템", "서버"]
     if any(k in text for k in aircon_kw + system_kw):
         return False
-    sensor_kw = ["온도", "기온", "습도", "습해", "습하", "미세먼지", "먼지", "pm", "오염", "대기질", "공기질", "공기", "센서", "날씨"]
+    sensor_kw = ["온도", "기온", "습도", "습해", "습하", "미세먼지", "먼지", "pm", "오염", "대기질", "공기질", "공기", "센서", "날씨", "데이터", "통계", "변화"]
     return any(k in text.lower() for k in sensor_kw)
 
 
@@ -698,8 +805,9 @@ def _humanize_result(result: dict) -> str:
 
 def _dispatch_sensor_query(text, time_ctx):
     """시간 컨텍스트가 확정된 센서 쿼리를 DB에서 직접 조회"""
-    is_dust    = any(k in text for k in ["미세먼지", "먼지", "pm", "오염"])
-    is_humidity = any(k in text for k in ["습도"])
+    tl = text.lower()
+    is_dust     = any(k in tl for k in ["미세먼지", "먼지", "pm", "오염", "대기질", "공기질", "공기"])
+    is_humidity = any(k in text for k in ["습도", "습해", "습하", "눅눅"])
     kind        = time_ctx[0]
 
     if kind == "point":
@@ -748,6 +856,11 @@ def _parse_schedule_datetime(text: str):
     if m:
         return now + timedelta(minutes=int(m.group(1)))
 
+    # 자정 = 다음 날 00:00
+    if "자정" in text:
+        tomorrow = now.date() + timedelta(days=1)
+        return datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0)
+
     has_tomorrow = "내일" in text
     base = (now + timedelta(days=1)).date() if has_tomorrow else now.date()
     is_pm = any(k in text for k in ["오후", "저녁", "밤", "야간"])
@@ -786,7 +899,8 @@ def _detect_schedule_intent(text: str):
     import re as _re
 
     # 목록 조회
-    if any(k in text for k in ["예약 목록", "예약 보여", "예약 확인", "예약된", "예약 있어", "예약 알려", "예약 현황"]):
+    if any(k in text for k in ["예약 목록", "예약 보여", "예약 확인", "예약된", "예약 있어", "예약 알려", "예약 현황",
+                                "예약돼", "예약됐", "예약 언제"]):
         return ("list", {})
 
     # 취소
@@ -963,28 +1077,43 @@ def _detect_aircon_command(text: str):
     # 예약 시간 표현이 있으면 즉시 제어가 아님
     if _parse_schedule_datetime(text) is not None:
         return None
-    # 상태 확인 문맥 제외 ("켜져 있어?", "꺼져 있어?" 등)
-    if any(k in text for k in ["켜져 있", "꺼져 있", "켜져있", "꺼져있"]):
+    # 상태 확인 문맥 제외 ("켜져 있어?", "꺼져 있어?" / "작동 중이야" 등)
+    if any(k in text for k in ["켜져 있", "꺼져 있", "켜져있", "꺼져있",
+                                "켜있", "꺼있", "작동 중", "가동 중", "돌고 있"]):
         return None
-    # 의문/추론문 제외
-    if any(k in text for k in ["할까", "해야", "켜야", "꺼야", "될까", "어때", "괜찮", "좋을까"]):
+    # 의문/추론/권고문 제외
+    if any(k in text for k in ["할까", "해야", "켜야", "꺼야", "될까", "어때", "괜찮", "좋을까",
+                                 "켤까", "꺼볼까", "켜볼까", "도 돼", "됩니까", "됩니다", "어떨까",
+                                 "필요해", "필요없", "필요 없", "좋겠어", "좋겠다", "게 좋", "야 해"]):
         return None
 
-    has_aircon    = any(k in text for k in ["에어컨", "냉방", "제습", "파워냉방", "에어콘"])
-    has_control   = any(k in text for k in ["켜줘", "켜", "틀어줘", "틀어", "해줘", "줄래", "시작", "켜라"])
-    has_mode_kw   = any(k in text for k in ["냉방", "제습", "파워냉방"])  # 단어만으로 제어 의도 확인
-    has_off       = any(k in text for k in ["꺼줘", "끄기", "꺼 줘", "끄줘"])
-    has_weather_feel = any(k in text for k in ["덥다", "더워", "시원하게", "습해", "눅눅"])
+    # 이력/정보 조회 패턴 — 명령이 아닌 쿼리
+    if any(k in text for k in ["언제", "마지막", "기록", "이력", "횟수", "몇 번", "몇번", "최근 제어", "최근 명령"]):
+        return None
+    # 과거형 끄기 상태 (꺼진 시간 등)
+    if any(k in text for k in ["꺼진", "꺼짐", "꺼졌"]):
+        return None
+
+    has_aircon    = any(k in text for k in ["에어컨", "냉방", "제습", "파워냉방", "에어콘", "파워"])
+    has_control   = any(k in text for k in ["켜줘", "켜", "틀어줘", "틀어", "해줘", "줄래", "시작", "켜라", "가동", "작동",
+                                             "약풍", "중풍", "강풍", "자동풍", "켤 수", "파워모드"]) or \
+                    bool(_re.search(r'\bon\b', text, _re.IGNORECASE))
+    has_mode_kw   = any(k in text for k in ["냉방", "제습", "파워냉방", "파워모드"])
+    has_off       = any(k in text for k in ["꺼줘", "끄기", "꺼 줘", "끄줘", "종료", "정지", "중지", "끊어",
+                                             "전원 내려", "오프"]) or \
+                    bool(_re.search(r'\boff\b', text, _re.IGNORECASE))
+    has_weather_feel = any(k in text for k in ["덥다", "더워", "시원하게", "습해", "눅눅", "더운데", "덥네", "더운"])
     has_temp_spec = bool(_re.search(r'\d+\s*도', text))
 
-    # 꺼짐 명령
+    # 꺼짐 명령 (꺼진/꺼짐/꺼있/꺼져있 등은 위 exclusion에서 이미 제외됨)
     if has_aircon and has_off:
         return {"mode": "off", "fan": "auto", "temp": 25}
     if has_aircon and _re.search(r'끄|꺼', text):
         return {"mode": "off", "fan": "auto", "temp": 25}
 
-    # 켜기 명령: (에어컨 키워드 OR 날씨 체감) AND (제어 동사 OR 냉방/제습 명시 OR 온도 지정)
-    if not ((has_aircon or has_weather_feel) and (has_control or has_mode_kw or has_temp_spec)):
+    # 켜기 명령: (에어컨 키워드 OR 날씨 체감) AND (제어 동사 OR 냉방/제습 명시 OR 온도 지정 OR 날씨체감+에어컨 동시)
+    if not ((has_aircon or has_weather_feel) and
+            (has_control or has_mode_kw or has_temp_spec or (has_weather_feel and has_aircon))):
         return None
 
     # 모드
@@ -1040,7 +1169,8 @@ def _format_system_stats(result: dict) -> str:
 _CASUAL_RESPONSES = {
     frozenset(["고마워", "고맙다", "감사해", "감사합니다", "고맙습니다", "땡큐"]): "천만에요! 더 필요한 것 있으면 말씀해 주세요.",
     frozenset(["안녕", "하이", "반가워"]): "안녕하세요! 온도·습도·에어컨 제어 무엇이든 도와드릴게요.",
-    frozenset(["뭘 할 수 있", "무엇을 할 수 있", "뭐 할 수 있", "어떤 기능", "기능이 뭐", "뭐가 돼"]):
+    frozenset(["뭘 할 수 있", "무엇을 할 수 있", "뭐 할 수 있", "어떤 기능", "기능이 뭐", "뭐가 돼",
+               "도움말", "도움 받", "뭐 도움", "기능 소개", "무엇을 물어", "사용법", "도와줘"]):
         "온도·습도·미세먼지 조회, 에어컨 제어(냉방/제습/파워냉방), 에어컨 예약(N시간 후/N시에 켜기·끄기), 시스템 상태 확인, 센서 이력 조회가 가능합니다.",
 }
 
@@ -1075,27 +1205,6 @@ def _ventilation_advice() -> str:
         return f"현재 PM2.5가 {pm25}μg/m³로 보통 수준입니다. 잠깐 환기는 괜찮습니다."
     return f"현재 PM2.5가 {pm25}μg/m³로 높은 편입니다. 환기를 자제해 주세요."
 
-
-def _parse_text_tool_call(content):
-    """LLM이 tool_calls 대신 content에 JSON으로 출력한 도구 호출 파싱"""
-    import re as _re
-    if not content:
-        return None
-    try:
-        data = json.loads(content.strip())
-        if isinstance(data, dict) and "name" in data and "arguments" in data:
-            return data
-    except (json.JSONDecodeError, ValueError):
-        pass
-    match = _re.search(r'\{.*?"name".*?"arguments".*?\}', content, _re.DOTALL)
-    if match:
-        try:
-            data = json.loads(match.group())
-            if "name" in data and "arguments" in data:
-                return data
-        except (json.JSONDecodeError, ValueError):
-            pass
-    return None
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -1140,11 +1249,28 @@ def chat():
         return jsonify({"reply": _format_aircon_result(result)})
 
     # ── Fast path D: 환기/창문 조언 ──
-    if any(k in user_message for k in ["환기", "창문 열", "바깥 공기"]):
+    if any(k in user_message for k in ["환기", "창문 열", "창문 여", "바깥 공기"]):
         return jsonify({"reply": _ventilation_advice()})
 
-    # ── Fast path D2: 에어컨 켜야 할까? 추론 ──
-    if any(k in user_message for k in ["에어컨 켜야", "냉방 켜야", "에어컨 켤까", "에어컨 킬까", "냉방 킬까"]):
+    # ── Fast path D2: 에어컨 관련 추론·조언 (명령 아님) ──
+    _D2_KW = [
+        "에어컨 켜야", "냉방 켜야", "에어컨 켤까", "에어컨 킬까", "냉방 킬까",
+        "냉방 필요", "에어컨 필요",
+        "냉방 꺼야", "에어컨 꺼야",
+        "에어컨 끄는 게", "냉방 끄는 게",
+        "에어컨 켜는 게", "냉방 켜는 게",
+        "에어컨 켜볼까", "냉방 켜볼까",
+        "냉방 강도", "에어컨 강도",
+        "에어컨 안 켜도", "냉방 안 켜도",
+        "냉방 돌려야", "에어컨 돌려야",
+        "에어컨 세게", "에어컨 온도 얼마",
+        "시원한 편", "쾌적한 편",
+        # 환경 상태 발언 → 센서 기반 응답
+        "쾌적해", "쾌적하다", "지금 쾌적", "날씨 쾌적",
+        "시원해", "덥지 않", "안 더워",
+        "냉방 좀", "에어컨 켤 필요",
+    ]
+    if any(k in user_message for k in _D2_KW):
         return jsonify({"reply": _aircon_advice()})
 
     # ── Fast path E: 대화 (인사/감사) ──
@@ -1153,27 +1279,51 @@ def chat():
         return jsonify({"reply": casual})
 
     # ── Fast path G: 에어컨 오늘 횟수 쿼리 ──
-    if any(k in user_message for k in ["몇 번", "몇번", "횟수", "얼마나 켰"]) and "에어컨" in user_message:
+    if any(k in user_message for k in ["몇 번", "몇번", "횟수", "얼마나 켰"]) and \
+       any(k in user_message for k in ["에어컨", "냉방"]):
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         rows = _db_query("SELECT COUNT(*) AS cnt FROM history WHERE timestamp >= %s", (today_start,))
         cnt  = rows[0]["cnt"] if rows else 0
         reply = f"오늘 에어컨을 {cnt}번 제어했습니다." if cnt else "오늘 에어컨 동작 기록이 없습니다."
         return jsonify({"reply": reply})
 
+    # ── Fast path G2: 에어컨 제어 이력 조회 ──
+    _hist_q_kw = ["이력", "기록", "언제", "마지막", "켠 시간", "꺼진 시간", "제어한 게", "최근 제어"]
+    if any(k in user_message for k in ["에어컨", "냉방"]) and \
+       any(k in user_message for k in _hist_q_kw) and \
+       not any(k in user_message for k in ["예약돼", "예약된", "예약 있", "예약됐", "예약 언제"]):
+        rows = _db_query(
+            "SELECT command, response, timestamp FROM history ORDER BY id DESC LIMIT 5"
+        )
+        if not rows:
+            return jsonify({"reply": "에어컨 제어 기록이 없습니다."})
+        lines = []
+        for r in rows:
+            ts = r.get("timestamp", "")
+            if hasattr(ts, "strftime"):
+                ts = ts.strftime("%Y-%m-%d %H:%M")
+            cmd = r.get("command", "")
+            lines.append(f"{ts}: {cmd}")
+        return jsonify({"reply": "에어컨 최근 제어 기록:\n" + "\n".join(lines)})
+
     # ── Fast path F: 시스템 통계 (LLM 우회 — 불안정하므로 Python 직접 조회) ──
     _sys_direct_kw = [
         "메모리", "ram", "램", "디스크", "저장 공간", "저장공간",
         "서버 상태", "서버상태", "서버 좀", "서버 알려",
         "라즈베리파이", "라즈베리 파이",
-        "시스템 상태", "시스템상태", "시스템 정보",
+        "시스템 상태", "시스템상태", "시스템 정보", "시스템 전체",
         "cpu 온도", "cpu온도", "cpu 사용",
+        "자원 상태", "리소스", "resource",
     ]
     if any(k in user_message.lower() for k in _sys_direct_kw):
         result = tool_get_system_stats({})
         return jsonify({"reply": _format_system_stats(result)})
 
-    # ── Fast path I: 에어컨 켜짐 상태 조회 ──
-    if "에어컨" in user_message and any(k in user_message for k in ["켜져", "꺼져", "작동 중", "상태 어", "켜있", "꺼있"]):
+    # ── Fast path I: 에어컨/냉방 켜짐 상태 조회 ──
+    _state_kw = ["켜져", "꺼져", "작동 중", "상태 어", "켜있", "꺼있",
+                 "동작 중", "가동 중", "돌고 있", "지금 어때", "현재 상태", "어때"]
+    if any(k in user_message for k in ["에어컨", "냉방"]) and \
+       any(k in user_message for k in _state_kw):
         is_on = _is_aircon_on()
         reply = "에어컨이 현재 켜져 있는 것으로 보입니다." if is_on else "에어컨이 현재 꺼져 있는 것으로 보입니다."
         return jsonify({"reply": reply})
@@ -1189,49 +1339,59 @@ def chat():
         .replace("{yesterday}", yesterday)
         .replace("{sensor_context}", sensor_ctx)
     )
-    messages = [{"role": "system", "content": system_content}]
+    # 대화 히스토리를 Gemini 형식으로 변환
+    gemini_history = []
     for h in history[-10:]:
         if isinstance(h, dict) and h.get("role") in ("user", "assistant"):
-            messages.append({"role": h["role"], "content": h.get("content", "")})
-    messages.append({"role": "user", "content": user_message})
+            role = "model" if h["role"] == "assistant" else "user"
+            gemini_history.append(genai_types.Content(
+                role=role,
+                parts=[genai_types.Part.from_text(text=h.get("content", ""))],
+            ))
 
-    # Tool calling 루프 — TOOLS_LLM (3개) 만 사용
+    chat_session = _gemini_client.chats.create(
+        model=GEMINI_MODEL,
+        config=genai_types.GenerateContentConfig(
+            system_instruction=system_content,
+            tools=_GEMINI_TOOLS,
+        ),
+        history=gemini_history,
+    )
+    response = chat_session.send_message(user_message)
+
+    # Tool calling 루프
     for _ in range(3):
-        response   = ollama.chat(model=OLLAMA_MODEL, messages=messages, tools=TOOLS_LLM, keep_alive=-1)
-        msg        = response.message
-        tool_calls = msg.tool_calls or []
+        parts    = (response.candidates[0].content.parts if response.candidates else []) or []
+        fn_calls = [p for p in parts if p.function_call and p.function_call.name]
 
-        if not tool_calls:
-            fallback = _parse_text_tool_call(msg.content)
-            if fallback:
-                name    = fallback["name"]
-                args    = fallback.get("arguments", {})
-                handler = TOOL_HANDLERS.get(name)
-                result  = handler(args) if handler else {"error": f"알 수 없는 도구: {name}"}
-                messages.append({"role": "assistant", "content": ""})
-                messages.append({"role": "tool",
-                                  "content": json.dumps(result, ensure_ascii=False, default=str)})
-                continue
-            return jsonify({"reply": msg.content})
+        if not fn_calls:
+            text = "".join(p.text for p in parts if hasattr(p, "text") and p.text)
+            return jsonify({"reply": text})
 
-        messages.append(msg)
-        for tc in tool_calls:
-            name    = tc.function.name
-            args    = tc.function.arguments if isinstance(tc.function.arguments, dict) else {}
-            handler = TOOL_HANDLERS.get(name)
-            result  = handler(args) if handler else {"error": f"알 수 없는 도구: {name}"}
-            messages.append({"role": "tool",
-                              "content": json.dumps(result, ensure_ascii=False, default=str)})
+        tool_responses = []
+        for p in fn_calls:
+            fc      = p.function_call
+            handler = TOOL_HANDLERS.get(fc.name)
+            args    = dict(fc.args) if fc.args else {}
+            result  = handler(args) if handler else {"error": f"알 수 없는 도구: {fc.name}"}
+            tool_responses.append(
+                genai_types.Part.from_function_response(
+                    name=fc.name,
+                    response={"result": json.dumps(result, ensure_ascii=False, default=str)},
+                )
+            )
+        response = chat_session.send_message(tool_responses)
 
-    final = ollama.chat(model=OLLAMA_MODEL, messages=messages, keep_alive=-1)
-    return jsonify({"reply": final.message.content})
+    parts = (response.candidates[0].content.parts if response.candidates else []) or []
+    text  = "".join(p.text for p in parts if hasattr(p, "text") and p.text)
+    return jsonify({"reply": text or "처리 중 오류가 발생했습니다."})
 
 
 @app.route("/api/chat/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "model": OLLAMA_MODEL})
+    return jsonify({"status": "ok", "model": GEMINI_MODEL})
 
 
 if __name__ == "__main__":
-    print(f"Chatbot starting on http://0.0.0.0:5001 (model: {OLLAMA_MODEL})")
+    print(f"Chatbot starting on http://0.0.0.0:5001 (model: {GEMINI_MODEL})")
     app.run(host="0.0.0.0", port=5001, debug=False)
