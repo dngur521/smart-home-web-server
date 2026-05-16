@@ -17,7 +17,7 @@
 - **pyserial** — Arduino 시리얼 통신 (`/dev/ttyUSB0`)
 - **bcrypt / PyJWT** — 비밀번호 해싱 및 JWT 인증
 - **APScheduler** — 에어컨 예약 실행 (매분 정각 cron 트리거)
-- **ollama** (qwen2.5:1.5b) — AI 챗봇 (`chatbot.py`)
+- **google-genai** (gemini-2.5-flash) — AI 챗봇 (`chatbot.py`, 무료 API)
 
 ---
 
@@ -27,7 +27,8 @@
 | ---- | ---- |
 | 라즈베리파이 5 | 백엔드 서버 실행 |
 | DHT22 | 온습도 센서 (GPIO 26, 물리 핀 37) |
-| Arduino (USB) | 에어컨 IR 제어 (`/dev/ttyUSB0`) |
+| Arduino (USB) | 에어컨 IR 제어 (`/dev/ttyUSB0`, 영구 연결 + Lock) |
+| TENT6000 빛센서 | 에어컨 켜짐 감지 (Arduino A0, threshold ≥ 20) |
 | Logitech C270 (USB) | CCTV 웹캠 (`/dev/video0`, MJPG 1280x960 30fps) |
 | Wemos D1 (ESP8266) + PMS7003 | WiFi 미세먼지 센서 모듈 (`Sensor/Sensor.ino`) |
 
@@ -77,6 +78,7 @@ python3 app.py
 | `FRONTEND_ORIGIN` | CORS 허용 Origin (개발 시 React dev 서버 주소) | `http://localhost:5173`                       |
 | `COOKIE_SECURE`   | HTTPS 환경에서 `true`로 설정                   | `false`                                       |
 | `DUST_SENSOR_URL` | Wemos D1 미세먼지 센서 주소                    | `http://192.168.0.x/dust` (변경 필수)         |
+| `GEMINI_API_KEY`  | Gemini AI 챗봇 API 키 (`.env` 파일에 저장)     | 필수 (`.env.example` 참고)                    |
 
 ---
 
@@ -92,6 +94,7 @@ python3 app.py
 | PUT    | `/api/user/update-password`           |  ✓   | 비밀번호 변경                               |
 | DELETE | `/api/user/delete`                    |  ✓   | 계정 삭제                                   |
 | POST   | `/api/arduino/send-command`           |  ✓   | Arduino 명령 전송 + 이력 저장               |
+| GET    | `/api/arduino/aircon-status`          |  ✓   | 빛센서 기반 에어컨 ON/OFF 조회              |
 | GET    | `/api/arduino/dht-sensor`             |  ✓   | 실시간 온습도 조회                          |
 | GET    | `/api/arduino/dht-history`            |  ✓   | 온습도 이력 (`?page=&limit=`)               |
 | GET    | `/api/arduino/dht-history/today`      |  ✓   | 오늘 온습도 전체 (ASC)                      |
@@ -157,6 +160,8 @@ bash monitor.sh
 | 이름 | 역할 | 포트 |
 | ---- | ---- | ---- |
 | `backend` | Flask API 서버 | 5000 |
-| `chatbot` | AI 챗봇 서버 (`chatbot.py`, ollama qwen2.5:1.5b) | 5001 |
+| `chatbot` | AI 챗봇 서버 (`chatbot.py`, Google Gemini API) | 5001 |
 | `cctv` | mjpg_streamer (Logitech C270, MJPG 1280x960 30fps) | 8080 |
 | `ttyd` | 웹 콘솔 (`--writable --base-path /console-ws`) | 7681 |
+
+> **Arduino 업로드 시 주의**: app.py가 `/dev/ttyUSB0`를 영구 점유하므로, 업로드 전 반드시 `pm2 stop backend` → 업로드 완료 후 `pm2 start backend`.

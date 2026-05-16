@@ -69,7 +69,10 @@ APScheduler `BackgroundScheduler`가 **매분 정각**(cron `second=0`)에 실�
 
 - **DHT22 sensor**: GPIO pin 26 (물리 핀 37), `adafruit-circuitpython-dht` 라이브러리, `use_pulseio=False` 필수
   - lgpio는 pip 설치 불가 → `sudo apt install python3-lgpio` 후 venv에 심볼릭 링크
-- **Arduino**: serial on `/dev/ttyUSB0` at 9600 baud
+- **Arduino**: serial on `/dev/ttyUSB0` at 9600 baud — **영구 연결(persistent)** + `threading.Lock` 동기화
+  - `_arduino_cmd(command)` 헬퍼가 연결 관리. 첫 연결 시 2s 대기, 이후 ~20–50ms
+  - **Arduino 업로드 시 반드시 `pm2 stop backend` 먼저 실행** (포트 점유로 업로드 실패)
+- **TENT6000 빛센서**: Arduino A0 핀 연결. `LIGHT` 명령으로 5회 median 샘플 반환 (50ms). threshold ≥ 20 = ON
 - **Wemos D1 (ESP8266)**: WiFi HTTP server, polls `/dust` for PMS7003 data (`DUST_SENSOR_URL`)
 - **CCTV (Logitech C270)**: `/dev/video0`, mjpg_streamer MJPG 1280x960 30fps
 - **CPU temp**: `vcgencmd measure_temp` subprocess call
@@ -100,7 +103,10 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 | GET | `/api/user/profile` | Yes | Get current user info |
 | PUT | `/api/user/update-password` | Yes | Change password |
 | DELETE | `/api/user/delete` | Yes | Delete own account |
-| POST | `/api/arduino/send-command` | Yes | Send command to Arduino, logs to `history` |
+| POST | `/api/arduino/send-command` | Yes | Send command to Arduino, logs to `history` (프론트·챗봇 모두 이 함수 경유) |
+| GET | `/api/arduino/aircon-status` | Yes | TENT6000 빛센서로 에어컨 ON/OFF 반환 (`is_on`, `light_value`, `threshold`) |
+| GET | `/api/internal/aircon-status` | No (localhost) | chatbot.py 전용 내부 API — 127.0.0.1만 허용 |
+| POST | `/api/internal/arduino/send` | No (localhost) | chatbot.py 전용 내부 API — `{"command":"SEND X,Y"}` |
 | GET | `/api/arduino/dht-sensor` | Yes | Live DHT22 reading |
 | GET | `/api/arduino/dht-history` | Yes | Paginated `sensor_data` (`?page=&limit=`) |
 | GET | `/api/arduino/dht-history/today` | Yes | 오늘 온습도 전체 (ASC) |
@@ -135,11 +141,17 @@ flask flask-cors pyserial adafruit-circuitpython-dht mysql-connector-python bcry
 
 ### chatbot.py (AI 챗봇 서버, 포트 5001)
 
-ollama `qwen2.5:1.5b` 기반 스마트홈 AI 어시스턴트. **Python-first 아키텍처** — 데이터 조회는 Python이 직접 처리하고, LLM은 추론/대화만 담당.
+**Google Gemini API** (`gemini-2.5-flash`) 기반 스마트홈 AI 어시스턴트. **Python-first 아키텍처** — 데이터 조회는 Python이 직접 처리하고, LLM은 추론/대화만 담당.
 
 ```
-pip install ollama
+pip install google-genai python-dotenv
 ```
+
+`.env` 파일에 `GEMINI_API_KEY=...` 필수 (`.env.example` 참고). 무료 한도: 1,500 RPD / 15 RPM.
+
+**시리얼 포트 접근**: chatbot.py는 시리얼 포트를 직접 열지 않는다. 모든 Arduino 통신은 app.py의 내부 API 경유.
+- `_is_aircon_on()` → `GET http://localhost:5000/api/internal/aircon-status`
+- `tool_control_aircon()` → `POST http://localhost:5000/api/internal/arduino/send`
 
 **Fast path 구조** (LLM 미호출):
 
@@ -147,13 +159,13 @@ pip install ollama
 |------|--------|------|
 | A | 시간 표현 + 센서 키워드 | DB 직접 조회 후 템플릿 응답 |
 | B | 현재 온도/습도/미세먼지 | 최신 레코드 조회 |
-| C | 에어컨 제어 키워드 | Python 파서 → 즉시 시리얼 전송 |
+| C | 에어컨 제어 키워드 | Python 파서 → 내부 API 경유 전송 |
 | D/D2 | 환기/창문 / 에어컨 켜야 할까 | PM2.5/온도 규칙 기반 답변 |
 | E | 인사/감사 대화 | 고정 응답 |
 | F | 시스템 상태 키워드 | system stats 직접 조회 |
 | G | 에어컨 몇 번 켰어? | COUNT(*) 쿼리 |
 | H | 에어컨 예약 (N시간 후/N시에) | `aircon_schedule` DB 직접 조작 |
-| I | 에어컨 켜져 있어? | `_is_aircon_on()` 기반 상태 응답 |
+| I | 에어컨 켜져 있어? | `_is_aircon_on()` → 내부 API → 빛센서 |
 
 **시간 파싱** (`_detect_time_context`, `_parse_schedule_datetime`):
 - 지원: `YYYY년MM월DD일`, `YY년도MM월`, `N시간 전/후`, `N분 전/후`, `한/두/세 시간 전/후`, `방금`, `아까`, `어제`, `오늘`, `최근N시간`, `밤/저녁/오전 N시`, `내일 N시`
