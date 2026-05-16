@@ -54,6 +54,40 @@ def _aircon_index(mode, fan="auto", temp=25):
         return _DEHUM_BASE.get(fan, _DEHUM_BASE["auto"]) + t
     return 1
 
+def _decode_aircon_index(index: int) -> dict:
+    """codes[] 인덱스 → mode/fan/temp 역변환"""
+    if index == 0:
+        return {"mode": "off",        "fan": "auto", "temp": 25}
+    if index == 1:
+        return {"mode": "cool",       "fan": "weak", "temp": 18}
+    if index == 2:
+        return {"mode": "power_cool", "fan": "auto", "temp": 25}
+    for start, end, mode, fan in [
+        (3,  15, "cool",       "weak"),
+        (16, 28, "cool",       "medium"),
+        (29, 41, "cool",       "strong"),
+        (42, 54, "cool",       "auto"),
+        (55, 67, "dehumidify", "weak"),
+        (68, 80, "dehumidify", "medium"),
+        (81, 93, "dehumidify", "strong"),
+        (94, 106,"dehumidify", "auto"),
+    ]:
+        if start <= index <= end:
+            return {"mode": mode, "fan": fan, "temp": 18 + (index - start)}
+    return {"mode": "cool", "fan": "auto", "temp": 25}
+
+def _get_current_aircon_state() -> dict | None:
+    """최근 에어컨 이력에서 현재 모드/풍량/온도 추출. 꺼짐 상태면 None."""
+    import re as _re
+    rows = _db_query("SELECT command FROM history ORDER BY timestamp DESC LIMIT 1")
+    if not rows:
+        return None
+    m = _re.match(r'SEND\s+(\d+),', rows[0].get("command", ""))
+    if not m:
+        return None
+    state = _decode_aircon_index(int(m.group(1)))
+    return None if state["mode"] == "off" else state
+
 # --- DB 헬퍼 ---
 def _db_query(query, params=None):
     conn = mysql.connector.connect(**DB_CONFIG)
@@ -1109,13 +1143,18 @@ def _detect_aircon_command(text: str):
             (has_control or has_mode_kw or has_temp_spec or (has_weather_feel and has_aircon))):
         return None
 
+    # 변경/조절 의도 감지 — 부분 파라미터만 지정 시 현재 상태를 보존
+    is_modify = any(k in text for k in ["바꿔", "변경", "올려", "내려", "높여", "낮춰", "조절"])
+
     # 모드
     if any(k in text for k in ["파워냉방", "파워 냉방", "강력냉방", "파워"]):
         mode = "power_cool"
     elif any(k in text for k in ["제습", "습해", "습하다", "눅눅"]):
         mode = "dehumidify"
-    else:
+    elif any(k in text for k in ["냉방"]):
         mode = "cool"
+    else:
+        mode = None if is_modify else "cool"
 
     # 풍량
     if any(k in text for k in ["약풍", "약하게"]):
@@ -1124,12 +1163,17 @@ def _detect_aircon_command(text: str):
         fan = "medium"
     elif any(k in text for k in ["강풍", "강하게"]):
         fan = "strong"
-    else:
+    elif any(k in text for k in ["자동풍"]):
         fan = "auto"
+    else:
+        fan = None if is_modify else "auto"
 
     # 온도 (18~30)
     m = _re.search(r'(\d+)\s*도', text)
-    temp = int(m.group(1)) if m and 18 <= int(m.group(1)) <= 30 else 25
+    if m and 18 <= int(m.group(1)) <= 30:
+        temp = int(m.group(1))
+    else:
+        temp = None if is_modify else 25
 
     return {"mode": mode, "fan": fan, "temp": temp}
 
@@ -1238,6 +1282,16 @@ def chat():
     # ── Fast path C: 에어컨 명령 (Python 파싱) ──
     aircon_cmd = _detect_aircon_command(user_message)
     if aircon_cmd:
+        # None 파라미터는 현재 에어컨 상태로 채움 (부분 변경 요청 처리)
+        if any(v is None for v in aircon_cmd.values()):
+            current = _get_current_aircon_state()
+            if current:
+                for k in ("mode", "fan", "temp"):
+                    if aircon_cmd[k] is None:
+                        aircon_cmd[k] = current[k]
+        if aircon_cmd["mode"] is None: aircon_cmd["mode"] = "cool"
+        if aircon_cmd["fan"]  is None: aircon_cmd["fan"]  = "auto"
+        if aircon_cmd["temp"] is None: aircon_cmd["temp"] = 25
         result = tool_control_aircon(aircon_cmd)
         return jsonify({"reply": _format_aircon_result(result)})
 
