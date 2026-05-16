@@ -179,3 +179,19 @@ ln -s /usr/lib/python3/dist-packages/_lgpio.cpython-313-aarch64-linux-gnu.so ven
 ## monitor.sh
 
 Standalone shell script (not part of the Flask server) that prints a formatted system stats summary to the terminal using `vcgencmd`, `smartctl`, `free`, `iostat`, and `sar`. Requires `sysstat`, `bc`, and `smartmontools` packages.
+
+## 노션 정리 포맷
+
+사용자가 "노션 정리용 작성해줘" 라고 하면 아래 형식으로 출력한다. 코드블록 없이 raw 마크다운으로 그대로 출력할 것.
+
+```
+- [영역] 작업 제목
+    - **문제**: 어떤 문제가 있었는지 (한 줄)
+    - **원인**: 왜 발생했는지 (한 줄)
+    - **해결**:
+        - 해결 방법 항목 1
+        - 해결 방법 항목 2
+```
+
+영역 태그: `[프론트]`, `[백엔드]`, `[프론트 + 백엔드]`, `[아두이노]`, `[챗봇]`  
+간결하고 명확하게. 불필요한 부연 설명 없이.
