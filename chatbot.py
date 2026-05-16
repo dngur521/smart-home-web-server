@@ -303,7 +303,7 @@ TOOL_HANDLERS = {
     "get_system_stats":    tool_get_system_stats,
 }
 
-# --- ollama 도구 스키마 ---
+# --- 도구 스키마 (레거시, fast path 미적용 경로에서 참조) ---
 TOOLS = [
     {
         "type": "function",
