@@ -13,3 +13,7 @@ pm2 stop backend
 claude --resume ecc364dc-9260-4037-8274-9acab8a3ad1f 
 
 pgrep -a python3
+
+arduino-cli compile --fqbn arduino:avr:uno Aircon/
+arduino-cli upload -p /dev/ttyUSB0 --fqbn arduino:avr:uno Aircon/
+
