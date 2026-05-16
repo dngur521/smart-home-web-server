@@ -165,8 +165,17 @@ void loop() {
         Serial.println("잘못된 입력 형식입니다. 'SEND <숫자1>,<숫자2>' 형식으로 입력하세요.");
       }
     } else if (input == "LIGHT") {
-      int val = analogRead(LIGHT_PIN);
-      Serial.println(val);
+      // 5회 샘플 중앙값으로 스파이크 노이즈 제거
+      int samples[5];
+      for (int i = 0; i < 5; i++) {
+        samples[i] = analogRead(LIGHT_PIN);
+        delay(10);
+      }
+      // 버블 정렬 후 중앙값
+      for (int i = 0; i < 4; i++)
+        for (int j = i + 1; j < 5; j++)
+          if (samples[i] > samples[j]) { int t = samples[i]; samples[i] = samples[j]; samples[j] = t; }
+      Serial.println(samples[2]);
     } else {
       Serial.println("잘못된 명령어입니다. 'SEND'로 시작하는 명령어를 입력하세요.");
     }

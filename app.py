@@ -728,12 +728,21 @@ def handle_get_dust_sensor():
 
 
 LIGHT_SENSOR_THRESHOLD = 20
+_light_history: list[bool] = []  # 최근 판정 이력 (히스테리시스용)
+_LIGHT_HISTORY_SIZE = 5          # 이력 유지 개수
+_LIGHT_ON_VOTES = 3              # ON 판정에 필요한 최소 과반수
 
 def _read_aircon_light() -> dict:
-    """빛센서 값을 읽어 ON/OFF 반환. 공통 로직."""
+    """빛센서 값을 읽어 ON/OFF 반환. 히스테리시스로 spike 노이즈 억제."""
+    global _light_history
     raw = _arduino_cmd("LIGHT")
     value = int(raw)
-    return {"is_on": value >= LIGHT_SENSOR_THRESHOLD, "light_value": value, "threshold": LIGHT_SENSOR_THRESHOLD}
+    current = value >= LIGHT_SENSOR_THRESHOLD
+    _light_history.append(current)
+    if len(_light_history) > _LIGHT_HISTORY_SIZE:
+        _light_history = _light_history[-_LIGHT_HISTORY_SIZE:]
+    is_on = _light_history.count(True) >= _LIGHT_ON_VOTES
+    return {"is_on": is_on, "light_value": value, "threshold": LIGHT_SENSOR_THRESHOLD}
 
 
 @app.route("/api/arduino/aircon-status", methods=["GET"])
