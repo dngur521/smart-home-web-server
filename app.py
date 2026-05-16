@@ -64,6 +64,7 @@ def _arduino_cmd(command: str) -> str:
             if _serial_conn is None or not _serial_conn.is_open:
                 _serial_conn = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=3)
                 time.sleep(2)  # 최초 연결 시 아두이노 리셋 대기
+                _serial_conn.reset_input_buffer()  # 리셋 중 쌓인 garbage 제거
             _serial_conn.write(f"{command}\n".encode("utf-8"))
             raw = _serial_conn.readline()
             try:
@@ -736,7 +737,11 @@ def _read_aircon_light() -> dict:
     """빛센서 값을 읽어 ON/OFF 반환. 히스테리시스로 spike 노이즈 억제."""
     global _light_history
     raw = _arduino_cmd("LIGHT")
-    value = int(raw)
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"LIGHT raw value parse error: {repr(raw)}", file=sys.stderr)
+        raise ValueError(f"LIGHT 응답 파싱 실패: {repr(raw)}")
     current = value >= LIGHT_SENSOR_THRESHOLD
     _light_history.append(current)
     if len(_light_history) > _LIGHT_HISTORY_SIZE:
