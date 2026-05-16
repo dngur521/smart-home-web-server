@@ -29,7 +29,8 @@
 | DHT22 | 온습도 센서 (GPIO 26, 물리 핀 37) |
 | Arduino (USB) | 에어컨 IR 제어 (`/dev/arduino`, 영구 연결 + Lock) |
 | TENT6000 빛센서 | 에어컨 켜짐 감지 (Arduino A0, threshold ≥ 20) |
-| Logitech C270 (USB) | CCTV 웹캠 (`/dev/video0`, MJPG 1280x960 30fps) |
+| Logitech C270 (USB) | CCTV 웹캠 (`/dev/video1`, MJPG 1280x960 30fps, USB 재연결 시 번호 변동 가능) |
+| Arduino 클론 CH340 (USB) | Pan-Tilt 서보 제어 (`/dev/ttyUSB0`, `Servo/Servo.ino`) |
 | Wemos D1 (ESP8266) + PMS7003 | WiFi 미세먼지 센서 모듈 (`Sensor/Sensor.ino`) |
 
 Wemos D1은 독립적인 WiFi HTTP 서버로 동작하며, 라즈베리파이 백엔드가 5분 정각마다 `/dust` 엔드포인트를 폴링해서 DB에 저장한다.
@@ -105,6 +106,7 @@ python3 app.py
 | GET    | `/api/arduino/dust-history`           |  ✓   | 미세먼지 이력 (`?page=&limit=`) / 범위 조회 (`?from=&to=`, ISO 8601 UTC)  |
 | GET    | `/api/arduino/dust-history/today`     |  ✓   | 오늘 미세먼지 전체 (ASC)                    |
 | GET    | `/api/arduino/environment-history`    |  ✓   | 온습도+미세먼지 5분 버킷 통합 이력          |
+| POST   | `/api/servo/move`                     |  ✓   | PTZ 서보 이동 (`{"direction":"left/right/up/down"}`) |
 | GET    | `/api/system/stats`                   |  ✓   | CPU / RAM / 디스크 / 네트워크 통계          |
 | GET    | `/api/system/cctv/config`             |  ✓   | 현재 CCTV 해상도/FPS 및 지원 옵션 조회      |
 | POST   | `/api/system/cctv/config`             |  ✓   | CCTV 해상도/FPS 변경 (mjpg_streamer 재시작) |

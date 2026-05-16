@@ -55,6 +55,10 @@ BAUD_RATE = 9600
 _serial_conn: serial.Serial | None = None
 _serial_lock = threading.Lock()
 
+SERVO_PORT = "/dev/ttyUSB0"
+_servo_conn: serial.Serial | None = None
+_servo_lock = threading.Lock()
+
 
 def _arduino_cmd(command: str) -> str:
     """Lock으로 동기화된 아두이노 시리얼 통신. 연결이 끊기면 재연결."""
@@ -79,6 +83,28 @@ def _arduino_cmd(command: str) -> str:
                     pass
             _serial_conn = None
             raise e
+
+
+def _servo_cmd(command: str) -> None:
+    """서보 아두이노에 시리얼 명령 전송. 응답 없음."""
+    global _servo_conn
+    with _servo_lock:
+        try:
+            if _servo_conn is None or not _servo_conn.is_open:
+                _servo_conn = serial.Serial(SERVO_PORT, BAUD_RATE, timeout=3)
+                time.sleep(2)
+                _servo_conn.reset_input_buffer()
+            _servo_conn.write(f"{command}\n".encode("utf-8"))
+        except Exception as e:
+            if _servo_conn:
+                try:
+                    _servo_conn.close()
+                except Exception:
+                    pass
+            _servo_conn = None
+            raise e
+
+
 SERVER_PORT = 5000  # Node.js 서버 포트 기준
 DUST_SENSOR_URL = os.environ.get(
     "DUST_SENSOR_URL", "http://192.168.0.38/dust"
@@ -857,6 +883,23 @@ def handle_environment_history():
             cursor.close()
         if "conn" in locals() and conn:
             conn.close()
+
+
+
+# --- 서보 모터 ---
+@app.route("/api/servo/move", methods=["POST"])
+@login_required
+def servo_move():
+    data = request.get_json()
+    direction = (data or {}).get("direction", "")
+    if direction not in ("left", "right", "up", "down"):
+        return jsonify({"error": "Invalid direction. Must be left, right, up, or down."}), 400
+    hw_direction = {"up": "down", "down": "up"}.get(direction, direction)
+    try:
+        _servo_cmd(f"MOVE {hw_direction}")
+        return jsonify({"success": True, "direction": direction})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # --- 4. React 정적 파일 서빙 ---

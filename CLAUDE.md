@@ -75,7 +75,12 @@ APScheduler `BackgroundScheduler`가 **매분 정각**(cron `second=0`)에 실�
   - **Arduino 업로드 시 반드시 `pm2 stop backend` 먼저 실행** (포트 점유로 업로드 실패)
 - **TENT6000 빛센서**: Arduino A0 핀 연결. `LIGHT` 명령으로 5회 median 샘플 반환 (50ms). threshold ≥ 20 = ON
 - **Wemos D1 (ESP8266)**: WiFi HTTP server, polls `/dust` for PMS7003 data (`DUST_SENSOR_URL`)
-- **CCTV (Logitech C270)**: `/dev/video0`, mjpg_streamer MJPG 1280x960 30fps
+- **서보 Arduino (Servo.ino)**: serial on `/dev/ttyUSB0` (CH340 클론) at 9600 baud — 영구 연결 + `threading.Lock`
+  - `_servo_cmd(command)` 헬퍼, 응답 없음 (write only)
+  - 명령: `MOVE left/right/up/down` — 연속 회전형 서보, 1회 명령 = 짧게 1회 구동
+  - up/down은 하드웨어 배선 반전으로 백엔드에서 방향 swap (`up`→`down`, `down`→`up` 전송)
+  - **업로드 시 반드시 `pm2 stop backend` 먼저 실행**
+- **CCTV (Logitech C270)**: `/dev/video1` (USB 재연결 시 번호 변동 가능), mjpg_streamer MJPG 1280x960 30fps
 - **CPU temp**: `vcgencmd measure_temp` subprocess call
 - **NVMe temp**: `sudo smartctl -A /dev/nvme0` (requires passwordless sudo for `smartctl`, `/etc/sudoers.d/smartctl`)
 
@@ -125,6 +130,16 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 | GET | `/api/schedule/aircon` | Yes | 에어컨 예약 목록 전체 조회 (scheduled_at ASC) |
 | DELETE | `/api/schedule/aircon/:id` | Yes | 특정 예약 취소 (pending → cancelled) |
 | DELETE | `/api/schedule/aircon/bulk` | Yes | 예약 일괄 삭제 (`status`, `older_than_days` 필터, pending 제외) |
+| POST | `/api/servo/move` | Yes | PTZ 서보 이동 (`{"direction":"left/right/up/down"}`) — up/down 백엔드에서 swap |
+
+## Servo.ino (Pan-Tilt 서보)
+
+위치: `Servo/Servo.ino`
+
+- Pan(좌우): 핀 9 / Tilt(상하): 핀 10 — 연속 회전형 서보
+- 시리얼 명령: `MOVE left/right/up/down`
+- `step()` 함수: 20ms 구동 후 중립(90°) 복귀
+- 포트: `/dev/ttyUSB0` (CH340 클론, udev 룰 없음)
 
 ## Sensor.ino (Wemos D1 / ESP8266)
 
