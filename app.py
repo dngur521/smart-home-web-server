@@ -51,6 +51,33 @@ SENSOR_PIN = 26
 dht_device = adafruit_dht.DHT22(board.D26, use_pulseio=False)
 SERIAL_PORT = "/dev/ttyUSB0"
 BAUD_RATE = 9600
+
+_serial_conn: serial.Serial | None = None
+_serial_lock = threading.Lock()
+
+
+def _arduino_cmd(command: str) -> str:
+    """Lock으로 동기화된 아두이노 시리얼 통신. 연결이 끊기면 재연결."""
+    global _serial_conn
+    with _serial_lock:
+        try:
+            if _serial_conn is None or not _serial_conn.is_open:
+                _serial_conn = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=3)
+                time.sleep(2)  # 최초 연결 시 아두이노 리셋 대기
+            _serial_conn.write(f"{command}\n".encode("utf-8"))
+            raw = _serial_conn.readline()
+            try:
+                return raw.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                return raw.decode("latin-1").strip()
+        except Exception as e:
+            if _serial_conn:
+                try:
+                    _serial_conn.close()
+                except Exception:
+                    pass
+            _serial_conn = None
+            raise e
 SERVER_PORT = 5000  # Node.js 서버 포트 기준
 DUST_SENSOR_URL = os.environ.get(
     "DUST_SENSOR_URL", "http://192.168.0.38/dust"
@@ -209,24 +236,17 @@ def clear_token_cookies(response):
 # --- 1. 하드웨어 제어 함수 ---
 def send_command_to_arduino(command):
     """아두이노로 명령을 전송하고 응답을 받습니다."""
-    ser = None
     try:
-        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-        time.sleep(2)
-        ser.write(f"{command}\n".encode("utf-8"))
-        response = ser.readline().decode("utf-8").strip()
+        response = _arduino_cmd(command)
         print(f"Arduino command: {command}, response: {response}")
         return {
             "status": "success",
             "message": "Command sent to Arduino.",
             "arduinoResponse": response,
         }
-    except serial.SerialException as e:
+    except Exception as e:
         print(f"Serial Error: {e}", file=sys.stderr)
         return {"status": "error", "message": f"Error communicating with Arduino: {e}"}
-    finally:
-        if ser and ser.is_open:
-            ser.close()
 
 
 # --- 2. 백그라운드 센서 데이터 저장 ---
@@ -718,29 +738,46 @@ def handle_get_dust_sensor():
 
 LIGHT_SENSOR_THRESHOLD = 20
 
+def _read_aircon_light() -> dict:
+    """빛센서 값을 읽어 ON/OFF 반환. 공통 로직."""
+    raw = _arduino_cmd("LIGHT")
+    value = int(raw)
+    return {"is_on": value >= LIGHT_SENSOR_THRESHOLD, "light_value": value, "threshold": LIGHT_SENSOR_THRESHOLD}
+
+
 @app.route("/api/arduino/aircon-status", methods=["GET"])
 @login_required
 def handle_aircon_status():
     """TENT6000 빛센서로 에어컨 켜짐 여부 실시간 판별"""
-    ser = None
     try:
-        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=3)
-        time.sleep(2)
-        ser.write(b"LIGHT\n")
-        raw = ser.readline().decode("utf-8").strip()
-        value = int(raw)
-        is_on = value >= LIGHT_SENSOR_THRESHOLD
-        return jsonify({
-            "status": "success",
-            "is_on": is_on,
-            "light_value": value,
-            "threshold": LIGHT_SENSOR_THRESHOLD,
-        }), 200
-    except (serial.SerialException, ValueError) as e:
+        data = _read_aircon_light()
+        return jsonify({"status": "success", **data}), 200
+    except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
-    finally:
-        if ser and ser.is_open:
-            ser.close()
+
+
+@app.route("/api/internal/aircon-status", methods=["GET"])
+def handle_internal_aircon_status():
+    """chatbot.py 전용 — 인증 없이 localhost에서만 접근 가능"""
+    if request.remote_addr != "127.0.0.1":
+        return jsonify({"error": "forbidden"}), 403
+    try:
+        return jsonify(_read_aircon_light()), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/internal/arduino/send", methods=["POST"])
+def handle_internal_arduino_send():
+    """chatbot.py 전용 — 인증 없이 localhost에서만 접근 가능"""
+    if request.remote_addr != "127.0.0.1":
+        return jsonify({"error": "forbidden"}), 403
+    body = request.get_json(silent=True) or {}
+    command = body.get("command", "").strip()
+    if not command:
+        return jsonify({"error": "command required"}), 400
+    result = send_command_to_arduino(command)
+    return jsonify(result), 200 if result["status"] == "success" else 500
 
 
 @app.route("/api/arduino/environment-history", methods=["GET"])

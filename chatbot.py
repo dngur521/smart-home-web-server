@@ -13,7 +13,7 @@ import psutil
 from dotenv import load_dotenv
 
 load_dotenv()
-import serial
+import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 
@@ -25,8 +25,7 @@ DB_CONFIG = {
     "password": "1234",
     "database": "smart_home",
 }
-SERIAL_PORT = "/dev/ttyUSB0"
-BAUD_RATE = 9600
+APP_INTERNAL_URL = "http://localhost:5000"
 GEMINI_MODEL    = "gemini-2.5-flash"
 GEMINI_API_KEY  = os.environ.get("GEMINI_API_KEY", "")
 _gemini_client  = genai.Client(api_key=GEMINI_API_KEY)
@@ -86,20 +85,17 @@ def _db_insert(query, params):
     conn.close()
 
 def _is_aircon_on():
-    """TENT6000 빛센서로 에어컨 켜짐 여부 판별. 실패 시 이력 기반으로 fallback."""
+    """TENT6000 빛센서로 에어컨 켜짐 여부 판별. app.py 내부 API 경유. 실패 시 이력 기반으로 fallback."""
     try:
-        import serial as _serial
-        ser = _serial.Serial("/dev/ttyUSB0", 9600, timeout=3)
-        time.sleep(2)
-        ser.write(b"LIGHT\n")
-        raw = ser.readline().decode("utf-8").strip()
-        ser.close()
-        return int(raw) >= 20
+        r = requests.get(f"{APP_INTERNAL_URL}/api/internal/aircon-status", timeout=5)
+        if r.status_code == 200:
+            return r.json().get("is_on", False)
     except Exception:
-        rows = _db_query("SELECT command FROM history ORDER BY timestamp DESC LIMIT 1")
-        if not rows:
-            return False
-        return rows[0].get("command", "") != "SEND 0,5"
+        pass
+    rows = _db_query("SELECT command FROM history ORDER BY timestamp DESC LIMIT 1")
+    if not rows:
+        return False
+    return rows[0].get("command", "") != "SEND 0,5"
 
 # --- 도구 구현 ---
 def tool_get_current_temperature(_args):
@@ -236,18 +232,15 @@ def tool_get_aircon_history(args):
     )
     return rows if rows else {"message": "에어컨 제어 이력 없음"}
 
-def _send_serial(ser, command):
-    ser.write(f"{command}\n".encode("utf-8"))
-    raw = ser.readline()
-    try:
-        response = raw.decode("utf-8").strip()
-    except UnicodeDecodeError:
-        response = raw.decode("latin-1").strip()
-    _db_insert(
-        "INSERT INTO history (command, response, timestamp) VALUES (%s, %s, %s)",
-        (command, response, datetime.now()),
+def _send_internal(command: str) -> str:
+    """app.py 내부 API를 통해 Arduino 명령 전송. 응답 문자열 반환."""
+    r = requests.post(
+        f"{APP_INTERNAL_URL}/api/internal/arduino/send",
+        json={"command": command},
+        timeout=10,
     )
-    return response
+    r.raise_for_status()
+    return r.json().get("response", "")
 
 def tool_control_aircon(args):
     mode = args.get("mode", "off")
@@ -255,18 +248,14 @@ def tool_control_aircon(args):
     temp = args.get("temp", 25)
     index   = _aircon_index(mode, fan, temp)
     command = f"SEND {index},5"
-    ser = None
     try:
-        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=3)
-        time.sleep(2)
-
         if mode == "off":
-            response = _send_serial(ser, command)
+            response = _send_internal(command)
         else:
             if not _is_aircon_on():
-                _send_serial(ser, "SEND 1,5")
+                _send_internal("SEND 1,5")
                 time.sleep(1)
-            response = _send_serial(ser, command)
+            response = _send_internal(command)
 
         mode_label = {"off": "전원 끄기", "cool": "냉방", "dehumidify": "제습", "power_cool": "파워냉방"}.get(mode, mode)
         fan_label  = {"weak": "약풍", "medium": "중풍", "strong": "강풍", "auto": "자동풍"}.get(fan, fan)
@@ -280,9 +269,6 @@ def tool_control_aircon(args):
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
-    finally:
-        if ser and ser.is_open:
-            ser.close()
 
 def tool_get_system_stats(_args):
     try:
