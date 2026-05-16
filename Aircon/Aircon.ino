@@ -3,6 +3,7 @@
 
 // IR LED가 연결된 핀 번호
 #define IR_SEND_PIN 11
+#define LIGHT_PIN A0
 
 // IR 발신 객체 생성
 IRsend irsend(IR_SEND_PIN);
@@ -163,6 +164,9 @@ void loop() {
       } else {
         Serial.println("잘못된 입력 형식입니다. 'SEND <숫자1>,<숫자2>' 형식으로 입력하세요.");
       }
+    } else if (input == "LIGHT") {
+      int val = analogRead(LIGHT_PIN);
+      Serial.println(val);
     } else {
       Serial.println("잘못된 명령어입니다. 'SEND'로 시작하는 명령어를 입력하세요.");
     }

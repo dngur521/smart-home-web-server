@@ -716,6 +716,33 @@ def handle_get_dust_sensor():
             conn.close()
 
 
+LIGHT_SENSOR_THRESHOLD = 20
+
+@app.route("/api/arduino/aircon-status", methods=["GET"])
+@login_required
+def handle_aircon_status():
+    """TENT6000 빛센서로 에어컨 켜짐 여부 실시간 판별"""
+    ser = None
+    try:
+        ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=3)
+        time.sleep(2)
+        ser.write(b"LIGHT\n")
+        raw = ser.readline().decode("utf-8").strip()
+        value = int(raw)
+        is_on = value >= LIGHT_SENSOR_THRESHOLD
+        return jsonify({
+            "status": "success",
+            "is_on": is_on,
+            "light_value": value,
+            "threshold": LIGHT_SENSOR_THRESHOLD,
+        }), 200
+    except (serial.SerialException, ValueError) as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    finally:
+        if ser and ser.is_open:
+            ser.close()
+
+
 @app.route("/api/arduino/environment-history", methods=["GET"])
 @login_required
 def handle_environment_history():

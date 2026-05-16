@@ -86,13 +86,20 @@ def _db_insert(query, params):
     conn.close()
 
 def _is_aircon_on():
-    """마지막 에어컨 명령이 OFF가 아니면 켜져 있다고 판단"""
-    rows = _db_query(
-        "SELECT command FROM history ORDER BY timestamp DESC LIMIT 1"
-    )
-    if not rows:
-        return False
-    return rows[0].get("command", "") != "SEND 0,5"
+    """TENT6000 빛센서로 에어컨 켜짐 여부 판별. 실패 시 이력 기반으로 fallback."""
+    try:
+        import serial as _serial
+        ser = _serial.Serial("/dev/ttyUSB0", 9600, timeout=3)
+        time.sleep(2)
+        ser.write(b"LIGHT\n")
+        raw = ser.readline().decode("utf-8").strip()
+        ser.close()
+        return int(raw) >= 20
+    except Exception:
+        rows = _db_query("SELECT command FROM history ORDER BY timestamp DESC LIMIT 1")
+        if not rows:
+            return False
+        return rows[0].get("command", "") != "SEND 0,5"
 
 # --- 도구 구현 ---
 def tool_get_current_temperature(_args):
