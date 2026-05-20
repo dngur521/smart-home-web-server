@@ -32,6 +32,7 @@
 | Logitech C270 (USB) | CCTV 웹캠 (`/dev/cctv`, udev 고정 심볼릭 링크, MJPG 1280x960 30fps) |
 | Arduino 클론 CH340 (USB) | Pan-Tilt 서보 제어 (`/dev/ttyUSB0`, `Servo/Servo.ino`) |
 | Wemos D1 (ESP8266) + PMS7003 | WiFi 미세먼지 센서 모듈 (`Sensor/Sensor.ino`) |
+| Galaxy S20 (Termux) | 플래시라이트 제어 (`S20_HOST`, `~/torch-server.py`) |
 
 Wemos D1은 독립적인 WiFi HTTP 서버로 동작하며, 라즈베리파이 백엔드가 5분 정각마다 `/dust` 엔드포인트를 폴링해서 DB에 저장한다.
 
@@ -80,6 +81,7 @@ python3 app.py
 | `COOKIE_SECURE`   | HTTPS 환경에서 `true`로 설정                   | `false`                                       |
 | `DUST_SENSOR_URL` | Wemos D1 미세먼지 센서 주소                    | `http://192.168.0.x/dust` (변경 필수)         |
 | `GEMINI_API_KEY`  | Gemini AI 챗봇 API 키 (`.env` 파일에 저장)     | 필수 (`.env.example` 참고)                    |
+| `S20_HOST`        | Galaxy S20 Termux 플래시 서버 주소             | `192.168.0.13:8282` (변경 필수)               |
 
 ---
 
@@ -114,6 +116,7 @@ python3 app.py
 | GET    | `/api/schedule/aircon`                |  ✓   | 에어컨 예약 목록 전체 조회                  |
 | DELETE | `/api/schedule/aircon/:id`            |  ✓   | 특정 예약 취소 (status → cancelled)         |
 | DELETE | `/api/schedule/aircon/bulk`           |  ✓   | 예약 일괄 삭제 (`status`, `older_than_days` 필터) |
+| POST   | `/api/torch`                          |  ✓   | S20 플래시라이트 제어 (`{"action":"on"/"off"}`)   |
 
 ---
 

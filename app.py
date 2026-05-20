@@ -109,6 +109,7 @@ SERVER_PORT = 5000  # Node.js 서버 포트 기준
 DUST_SENSOR_URL = os.environ.get(
     "DUST_SENSOR_URL", "http://192.168.0.38/dust"
 )  # Wemos D1 IP로 변경
+S20_HOST = os.environ.get("S20_HOST", "192.168.0.13:8282")
 
 # --- 설정: CCTV (mjpg_streamer) ---
 CCTV_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cctv_config.json")
@@ -1599,6 +1600,19 @@ def set_cctv_config():
         return jsonify({"status": "error", "message": f"CCTV 재시작 실패: {err}"}), 500
 
     return jsonify({"status": "success", "data": {"resolution": resolution, "fps": fps}}), 200
+
+
+@app.route("/api/torch", methods=["POST"])
+@login_required
+def torch_control():
+    action = request.json.get("action")
+    if action not in ("on", "off"):
+        return jsonify({"error": "invalid action"}), 400
+    try:
+        res = requests.post(f"http://{S20_HOST}/torch/{action}", timeout=3)
+        return jsonify({"torch": action, "ok": res.status_code == 200})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
 
 
 # --- 5. 서버 실행 (기존 server.py + server.js) ---

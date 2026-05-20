@@ -30,6 +30,7 @@ The server listens on `http://0.0.0.0:5000`.
 - `SECRET_KEY` environment variable set (falls back to an insecure default)
 - React frontend built to `dist/` (the server serves `dist/index.html` for all non-API routes)
 - `DUST_SENSOR_URL` environment variable set to `http://<Wemos D1 IP>/dust`
+- `S20_HOST` environment variable set to `<S20 IP>:8282` (Termux torch server)
 
 On startup, `app.py` auto-creates the `history`, `sensor_data`, `users`, `dust_data`, `aircon_schedule` tables if they don't exist.
 
@@ -82,6 +83,9 @@ APScheduler `BackgroundScheduler`가 **매분 정각**(cron `second=0`)에 실�
   - **업로드 시 반드시 `pm2 stop backend` 먼저 실행**
 - **CCTV (Logitech C270)**: `/dev/cctv` (udev 심볼릭 링크, VID:046d/PID:0825, capture 노드만 매칭), mjpg_streamer MJPG 1280x960 30fps
   - udev 룰: `/etc/udev/rules.d/99-webcam.rules` — USB 재연결 후 video 번호 변동 무관
+- **S20 플래시라이트**: Galaxy S20에서 Termux + Termux:API + Python HTTP 서버(`~/torch-server.py`) 실행
+  - `S20_HOST` 환경변수로 주소 지정 (기본값 `192.168.0.13:8282`)
+  - `POST /torch/on`, `POST /torch/off` 엔드포인트를 Flask가 프록시 (`/api/torch`)
 - **CPU temp**: `vcgencmd measure_temp` subprocess call
 - **NVMe temp**: `sudo smartctl -A /dev/nvme0` (requires passwordless sudo for `smartctl`, `/etc/sudoers.d/smartctl`)
 
@@ -132,6 +136,7 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 | DELETE | `/api/schedule/aircon/:id` | Yes | 특정 예약 취소 (pending → cancelled) |
 | DELETE | `/api/schedule/aircon/bulk` | Yes | 예약 일괄 삭제 (`status`, `older_than_days` 필터, pending 제외) |
 | POST | `/api/servo/move` | Yes | PTZ 서보 이동 (`{"direction":"left/right/up/down"}`) — up/down 백엔드에서 swap |
+| POST | `/api/torch` | Yes | S20 플래시라이트 제어 (`{"action":"on"/"off"}`) — Termux HTTP 서버 프록시 |
 
 ## Servo.ino (Pan-Tilt 서보)
 
