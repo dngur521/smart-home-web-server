@@ -30,7 +30,7 @@ class _Broadcaster:
             try:
                 proc = subprocess.Popen(
                     ['ffmpeg',
-                     '-f', 'alsa', '-fragment_size', '512', '-i', ALSA_DEVICE,
+                     '-f', 'alsa', '-i', ALSA_DEVICE,
                      '-ac', '1', '-ar', str(SAMPLE_RATE), '-f', 's16le', 'pipe:1'],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 )
@@ -106,7 +106,6 @@ async def offer(request: web.Request) -> web.Response:
 
     pc = RTCPeerConnection(configuration=ICE_CONFIG)
     pcs.add(pc)
-    pc.addTrack(AlsaAudioTrack(broadcaster))
 
     @pc.on('connectionstatechange')
     async def on_state_change():
@@ -114,7 +113,9 @@ async def offer(request: web.Request) -> web.Response:
             await pc.close()
             pcs.discard(pc)
 
+    # setRemoteDescription 먼저 → 트랜시버 방향이 offer SDP로 초기화된 뒤 track 추가
     await pc.setRemoteDescription(sdp_offer)
+    pc.addTrack(AlsaAudioTrack(broadcaster))
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 

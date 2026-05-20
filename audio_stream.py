@@ -22,7 +22,7 @@ class AudioBroadcaster:
             try:
                 proc = subprocess.Popen(
                     ['ffmpeg',
-                     '-f', 'alsa', '-fragment_size', '512', '-i', ALSA_DEVICE,
+                     '-f', 'alsa', '-i', ALSA_DEVICE,
                      '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '32k',
                      '-reservoir', '0', '-flush_packets', '1',
                      '-f', 'mp3', 'pipe:1'],
