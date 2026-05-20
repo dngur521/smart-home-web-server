@@ -48,6 +48,11 @@ void setup() {
   Serial.begin(9600);
   pmsSerial.begin(9600);
 
+  IPAddress local_IP(192, 168, 0, 38);
+  IPAddress gateway(192, 168, 0, 1);
+  IPAddress subnet(255, 255, 255, 0);
+  WiFi.config(local_IP, gateway, subnet);
+
   WiFi.setSleepMode(WIFI_NONE_SLEEP);
   WiFi.begin(ssid, password);
   Serial.print("WiFi 연결 중");
