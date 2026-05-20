@@ -16,6 +16,7 @@ pm2 start venv/bin/python3 --name backend -- app.py
 pm2 start /usr/local/bin/mjpg_streamer --name cctv -- \
   -i "/usr/local/lib/mjpg-streamer/input_uvc.so -d /dev/cctv -r 1280x960 -f 30" \
   -o "/usr/local/lib/mjpg-streamer/output_http.so -p 8080 -w /usr/local/share/mjpg-streamer/www"
+pm2 start venv/bin/python3 --name audio -- audio_stream.py
 pm2 start /usr/local/bin/ttyd --name ttyd -- --port 7681 --writable --base-path /console-ws bash
 
 # 직접 실행 (포그라운드)
@@ -84,6 +85,7 @@ APScheduler `BackgroundScheduler`가 **매분 정각**(cron `second=0`)에 실�
   - **업로드 시 반드시 `pm2 stop backend` 먼저 실행**
 - **CCTV (Logitech C270)**: `/dev/cctv` (udev 심볼릭 링크, VID:046d/PID:0825, capture 노드만 매칭), mjpg_streamer MJPG 1280x960 30fps
   - udev 룰: `/etc/udev/rules.d/99-webcam.rules` — USB 재연결 후 video 번호 변동 무관
+  - **내장 마이크**: ALSA `plughw:2,0` (`card 2: U0x46d0x825`) — `audio_stream.py`가 ffmpeg으로 캡처해 MP3 32k mono 스트림 제공 (포트 8082, `GET /audio`)
 - **S20 플래시라이트**: Galaxy S20에서 Termux + Termux:API + Python HTTP 서버(`~/torch-server.py`) 실행
   - `S20_HOST` 환경변수로 주소 지정 (기본값 `192.168.0.13:8282`)
   - `POST /torch/on`, `POST /torch/off` 엔드포인트를 Flask가 프록시 (`/api/torch`)

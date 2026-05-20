@@ -117,6 +117,7 @@ python3 app.py
 | DELETE | `/api/schedule/aircon/:id`            |  ✓   | 특정 예약 취소 (status → cancelled)         |
 | DELETE | `/api/schedule/aircon/bulk`           |  ✓   | 예약 일괄 삭제 (`status`, `older_than_days` 필터) |
 | POST   | `/api/torch`                          |  ✓   | S20 플래시라이트 제어 (`{"action":"on"/"off"}`)   |
+| GET    | `/audio`                              |  ✗   | C270 마이크 실시간 MP3 스트림 (포트 8082)         |
 
 ---
 
@@ -167,6 +168,7 @@ bash monitor.sh
 | `backend` | Flask API 서버 | 5000 |
 | `chatbot` | AI 챗봇 서버 (`chatbot.py`, Google Gemini API) | 5001 |
 | `cctv` | mjpg_streamer (Logitech C270, MJPG 1280x960 30fps) | 8080 |
+| `audio` | C270 마이크 오디오 스트림 (`audio_stream.py`, MP3 32k mono) | 8082 |
 | `ttyd` | 웹 콘솔 (`--writable --base-path /console-ws`) | 7681 |
 
 > **Arduino 업로드 시 주의**: app.py가 `/dev/arduino`를 영구 점유하므로, 업로드 전 반드시 `pm2 stop backend` → 업로드 완료 후 `pm2 start backend`.
