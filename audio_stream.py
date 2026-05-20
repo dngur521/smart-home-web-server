@@ -7,8 +7,8 @@ CORS(app, origins=os.environ.get('FRONTEND_ORIGIN', 'http://localhost:5173'),
      supports_credentials=True)
 
 ALSA_DEVICE = 'plughw:2,0'
-CHUNK_SIZE  = 4096
-MAX_QUEUE   = 30  # ~30초치 버퍼 per client
+CHUNK_SIZE  = 512
+MAX_QUEUE   = 60  # 클라이언트당 버퍼 (청크 작아져서 개수 늘림)
 
 
 class AudioBroadcaster:
@@ -21,8 +21,10 @@ class AudioBroadcaster:
         while True:
             try:
                 proc = subprocess.Popen(
-                    ['ffmpeg', '-f', 'alsa', '-i', ALSA_DEVICE,
+                    ['ffmpeg',
+                     '-f', 'alsa', '-fragment_size', '512', '-i', ALSA_DEVICE,
                      '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '32k',
+                     '-reservoir', '0', '-flush_packets', '1',
                      '-f', 'mp3', 'pipe:1'],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
                 )
