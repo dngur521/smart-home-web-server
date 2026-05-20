@@ -10,7 +10,7 @@ pm2 logs backend
 pm2 restart backend
 pm2 stop backend
 
-claude --resume ecc364dc-9260-4037-8274-9acab8a3ad1f 
+claude --resume 388ef836-67ec-419b-8647-ad5ee30c77e9
 
 pgrep -a python3
 

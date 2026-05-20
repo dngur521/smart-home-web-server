@@ -13,3 +13,4 @@ cctv_config.json
 .claude
 *.png
 __pycache__
+*.txt
