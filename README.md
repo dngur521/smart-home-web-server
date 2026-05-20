@@ -34,7 +34,7 @@
 | Wemos D1 (ESP8266) + PMS7003 | WiFi 미세먼지 센서 모듈 (`Sensor/Sensor.ino`) |
 | Galaxy S20 (Termux) | 플래시라이트 제어 (`S20_HOST`, `~/torch-server.py`) |
 
-Wemos D1은 독립적인 WiFi HTTP 서버로 동작하며, 라즈베리파이 백엔드가 5분 정각마다 `/dust` 엔드포인트를 폴링해서 DB에 저장한다.
+Wemos D1은 독립적인 WiFi HTTP 서버로 동작하며, 라즈베리파이 백엔드가 5분 정각마다 `/dust` 엔드포인트를 폴링해서 DB에 저장한다. IP는 `192.168.0.38`로 정적 고정(`Sensor.ino` 내 `WiFi.config()`).
 
 ---
 
@@ -79,7 +79,7 @@ python3 app.py
 | `SECRET_KEY`      | JWT 서명 키                                    | `your_super_secret_key_change_me` (변경 필수) |
 | `FRONTEND_ORIGIN` | CORS 허용 Origin (개발 시 React dev 서버 주소) | `http://localhost:5173`                       |
 | `COOKIE_SECURE`   | HTTPS 환경에서 `true`로 설정                   | `false`                                       |
-| `DUST_SENSOR_URL` | Wemos D1 미세먼지 센서 주소                    | `http://192.168.0.x/dust` (변경 필수)         |
+| `DUST_SENSOR_URL` | Wemos D1 미세먼지 센서 주소                    | `http://192.168.0.38/dust`                    |
 | `GEMINI_API_KEY`  | Gemini AI 챗봇 API 키 (`.env` 파일에 저장)     | 필수 (`.env.example` 참고)                    |
 | `S20_HOST`        | Galaxy S20 Termux 플래시 서버 주소             | `192.168.0.13:8282` (변경 필수)               |
 

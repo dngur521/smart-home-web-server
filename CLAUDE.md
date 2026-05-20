@@ -76,6 +76,7 @@ APScheduler `BackgroundScheduler`가 **매분 정각**(cron `second=0`)에 실�
   - **Arduino 업로드 시 반드시 `pm2 stop backend` 먼저 실행** (포트 점유로 업로드 실패)
 - **TENT6000 빛센서**: Arduino A0 핀 연결. `LIGHT` 명령으로 5회 median 샘플 반환 (50ms). threshold ≥ 20 = ON
 - **Wemos D1 (ESP8266)**: WiFi HTTP server, polls `/dust` for PMS7003 data (`DUST_SENSOR_URL`)
+  - 정적 IP `192.168.0.38` 고정 — `Sensor.ino`의 `WiFi.config()`로 설정 (DHCP 재할당 방지)
 - **서보 Arduino (Servo.ino)**: serial on `/dev/ttyUSB0` (CH340 클론) at 9600 baud — 영구 연결 + `threading.Lock`
   - `_servo_cmd(command)` 헬퍼, 응답 없음 (write only)
   - 명령: `MOVE left/right/up/down` — 연속 회전형 서보, 1회 명령 = 짧게 1회 구동
@@ -154,6 +155,7 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 - PMS7003 미세먼지 센서: SoftwareSerial TX→D7(GPIO13), RX→D6(GPIO12)
 - `/dust` 엔드포인트로 `pm1_0`, `pm2_5`, `pm10` 반환
 - 라즈베리파이 백엔드가 5분마다 이 엔드포인트를 폴링해서 DB에 저장
+- 정적 IP `192.168.0.38` — `WiFi.config()`로 고정 (재부팅 후에도 IP 불변)
 
 ## Python Dependencies
 
