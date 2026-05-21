@@ -1273,7 +1273,7 @@ _CASUAL_RESPONSES = {
     frozenset(["안녕", "하이", "반가워"]): "안녕하세요! 온도·습도·에어컨 제어 무엇이든 도와드릴게요.",
     frozenset(["뭘 할 수 있", "무엇을 할 수 있", "뭐 할 수 있", "어떤 기능", "기능이 뭐", "뭐가 돼",
                "도움말", "도움 받", "뭐 도움", "기능 소개", "무엇을 물어", "사용법", "도와줘"]):
-        "온도·습도·미세먼지 조회, 에어컨 제어(냉방/제습/파워냉방), 에어컨 예약, 카메라 방향 제어(좌/우/위/아래), 플래시라이트 켜기·끄기, 시스템 상태 확인이 가능합니다.",
+        "온도·습도·미세먼지 조회, 에어컨 제어·예약, 카메라 방향 제어, 플래시라이트 켜기·끄기, CCTV 실시간 장면 분석(불 켜져있어? 등), 시스템 상태 확인이 가능합니다.",
 }
 
 def _detect_casual(text: str):
@@ -1348,6 +1348,54 @@ def _format_servo_result(result: dict) -> str:
         label = {"left": "왼쪽", "right": "오른쪽", "up": "위", "down": "아래"}.get(result.get("direction", ""), "")
         return f"카메라를 {label}으로 이동했습니다."
     return f"카메라 이동 실패: {result.get('error', '알 수 없는 오류')}"
+
+
+MJPG_SNAPSHOT_URL = "http://127.0.0.1:8080/?action=snapshot"
+
+_VISION_KW = [
+    "방 어때", "방의 모습", "방 모습", "방 상태", "방 좀 봐", "방 봐줘",
+    "방에 불", "불이 켜", "불 켜져", "불 꺼져", "불 켜있", "불 꺼있",
+    "불 켜져", "불이 켜져", "불이 꺼져",
+    "어두워", "밝아", "방 밝", "방 어두", "실내 밝", "실내 어두",
+    "지금 방", "방 지금", "실내 상황", "실내 모습",
+    "카메라로 봐", "카메라 봐줘", "cctv 봐", "cctv로 봐",
+    "무엇이 있어", "뭐가 있어", "뭐 있어", "누가 있어", "사람 있어",
+    "집 어때", "집 상태", "지금 집",
+]
+
+def _detect_vision_query(text: str) -> bool:
+    return any(k in text for k in _VISION_KW)
+
+
+def _capture_cctv_frame() -> bytes | None:
+    """mjpg_streamer에서 JPEG 스냅샷 한 장 캡처"""
+    try:
+        r = requests.get(MJPG_SNAPSHOT_URL, timeout=5)
+        if r.status_code == 200 and r.content:
+            return r.content
+    except Exception:
+        pass
+    return None
+
+
+def _vision_query(user_message: str, frame: bytes) -> str:
+    """CCTV 프레임 + 질문을 Gemini 멀티모달로 전송, 한국어 답변 반환"""
+    prompt = (
+        "이것은 스마트홈 실내 CCTV 이미지입니다. "
+        "아래 질문에 한국어로 1~2문장으로 간결하게 답하세요.\n"
+        f"질문: {user_message}"
+    )
+    try:
+        response = _gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[
+                genai_types.Part.from_bytes(data=frame, mime_type="image/jpeg"),
+                genai_types.Part.from_text(text=prompt),
+            ],
+        )
+        return response.text or "이미지를 분석할 수 없습니다."
+    except Exception as e:
+        return f"이미지 분석 중 오류가 발생했습니다: {e}"
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -1493,6 +1541,13 @@ def chat():
     if servo_dir:
         result = tool_control_servo({"direction": servo_dir})
         return jsonify({"reply": _format_servo_result(result)})
+
+    # ── Fast path V: CCTV 비전 분석 ──
+    if _detect_vision_query(user_message):
+        frame = _capture_cctv_frame()
+        if frame is None:
+            return jsonify({"reply": "현재 카메라 연결이 되지 않아 영상을 확인할 수 없습니다."})
+        return jsonify({"reply": _vision_query(user_message, frame)})
 
     # ── LLM path: 에어컨 제어·시스템 상태·추론·대화 ─────────────────────────
     now           = datetime.now()
