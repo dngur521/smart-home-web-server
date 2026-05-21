@@ -812,6 +812,39 @@ def handle_internal_arduino_send():
     return jsonify(result), 200 if result["status"] == "success" else 500
 
 
+@app.route("/api/internal/torch", methods=["POST"])
+def handle_internal_torch():
+    """chatbot.py 전용 — 인증 없이 localhost에서만 접근 가능"""
+    if request.remote_addr != "127.0.0.1":
+        return jsonify({"error": "forbidden"}), 403
+    body = request.get_json(silent=True) or {}
+    action = body.get("action", "")
+    if action not in ("on", "off"):
+        return jsonify({"error": "invalid action"}), 400
+    try:
+        res = requests.post(f"http://{S20_HOST}/torch/{action}", timeout=3)
+        return jsonify({"torch": action, "ok": res.status_code == 200})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
+
+
+@app.route("/api/internal/servo/move", methods=["POST"])
+def handle_internal_servo_move():
+    """chatbot.py 전용 — 인증 없이 localhost에서만 접근 가능"""
+    if request.remote_addr != "127.0.0.1":
+        return jsonify({"error": "forbidden"}), 403
+    body = request.get_json(silent=True) or {}
+    direction = body.get("direction", "")
+    if direction not in ("left", "right", "up", "down"):
+        return jsonify({"error": "invalid direction"}), 400
+    hw_direction = {"up": "down", "down": "up"}.get(direction, direction)
+    try:
+        _servo_cmd(f"MOVE {hw_direction}")
+        return jsonify({"success": True, "direction": direction})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/arduino/environment-history", methods=["GET"])
 @login_required
 def handle_environment_history():

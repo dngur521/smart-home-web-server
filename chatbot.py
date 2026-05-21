@@ -304,6 +304,39 @@ def tool_control_aircon(args):
     except Exception as e:
         return {"success": False, "error": str(e)}
 
+def tool_control_torch(args):
+    action = args.get("action", "off")
+    if action not in ("on", "off"):
+        return {"success": False, "error": "on 또는 off만 가능합니다."}
+    try:
+        r = requests.post(
+            f"{APP_INTERNAL_URL}/api/internal/torch",
+            json={"action": action},
+            timeout=5,
+        )
+        r.raise_for_status()
+        data = r.json()
+        return {"success": data.get("ok", False), "action": action}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+def tool_control_servo(args):
+    direction = args.get("direction", "")
+    if direction not in ("left", "right", "up", "down"):
+        return {"success": False, "error": "left/right/up/down 중 하나여야 합니다."}
+    try:
+        r = requests.post(
+            f"{APP_INTERNAL_URL}/api/internal/servo/move",
+            json={"direction": direction},
+            timeout=5,
+        )
+        r.raise_for_status()
+        return {"success": True, "direction": direction}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 def tool_get_system_stats(_args):
     try:
         cpu_temp = subprocess.check_output(["vcgencmd", "measure_temp"]).decode().split("=")[1].split("'")[0]
@@ -334,6 +367,8 @@ TOOL_HANDLERS = {
     "get_dust_history":    tool_get_dust_history,
     "get_aircon_history":  tool_get_aircon_history,
     "control_aircon":      tool_control_aircon,
+    "control_torch":       tool_control_torch,
+    "control_servo":       tool_control_servo,
     "get_system_stats":    tool_get_system_stats,
 }
 
@@ -564,6 +599,36 @@ _GEMINI_TOOLS = [genai_types.Tool(
                         description="조회할 이력 수 (기본 10)",
                     ),
                 },
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="control_torch",
+            description="Galaxy S20 플래시라이트(손전등/라이트)를 켜거나 끕니다.",
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "action": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        enum=["on", "off"],
+                        description="on=켜기, off=끄기",
+                    ),
+                },
+                required=["action"],
+            ),
+        ),
+        genai_types.FunctionDeclaration(
+            name="control_servo",
+            description="CCTV Pan-Tilt 서보 모터를 한 방향으로 움직입니다. 카메라 방향 제어.",
+            parameters=genai_types.Schema(
+                type=genai_types.Type.OBJECT,
+                properties={
+                    "direction": genai_types.Schema(
+                        type=genai_types.Type.STRING,
+                        enum=["left", "right", "up", "down"],
+                        description="left=왼쪽, right=오른쪽, up=위, down=아래",
+                    ),
+                },
+                required=["direction"],
             ),
         ),
     ]
@@ -1208,7 +1273,7 @@ _CASUAL_RESPONSES = {
     frozenset(["안녕", "하이", "반가워"]): "안녕하세요! 온도·습도·에어컨 제어 무엇이든 도와드릴게요.",
     frozenset(["뭘 할 수 있", "무엇을 할 수 있", "뭐 할 수 있", "어떤 기능", "기능이 뭐", "뭐가 돼",
                "도움말", "도움 받", "뭐 도움", "기능 소개", "무엇을 물어", "사용법", "도와줘"]):
-        "온도·습도·미세먼지 조회, 에어컨 제어(냉방/제습/파워냉방), 에어컨 예약(N시간 후/N시에 켜기·끄기), 시스템 상태 확인, 센서 이력 조회가 가능합니다.",
+        "온도·습도·미세먼지 조회, 에어컨 제어(냉방/제습/파워냉방), 에어컨 예약, 카메라 방향 제어(좌/우/위/아래), 플래시라이트 켜기·끄기, 시스템 상태 확인이 가능합니다.",
 }
 
 def _detect_casual(text: str):
@@ -1242,6 +1307,47 @@ def _ventilation_advice() -> str:
         return f"현재 PM2.5가 {pm25}μg/m³로 보통 수준입니다. 잠깐 환기는 괜찮습니다."
     return f"현재 PM2.5가 {pm25}μg/m³로 높은 편입니다. 환기를 자제해 주세요."
 
+
+def _detect_torch_command(text: str):
+    """플래시라이트 ON/OFF 감지. 반환: 'on'|'off'|None"""
+    on_kw  = ["플래시 켜", "라이트 켜", "손전등 켜", "불 켜", "플래시라이트 켜",
+               "플래시 틀어", "라이트 틀어", "플래시켜", "라이트켜", "손전등켜"]
+    off_kw = ["플래시 꺼", "라이트 꺼", "손전등 꺼", "불 꺼", "플래시라이트 꺼",
+               "플래시 끄", "라이트 끄", "플래시꺼", "라이트꺼", "손전등꺼"]
+    if any(k in text for k in on_kw):
+        return "on"
+    if any(k in text for k in off_kw):
+        return "off"
+    return None
+
+
+def _detect_servo_command(text: str):
+    """Pan-Tilt 서보 방향 감지. 반환: 'left'|'right'|'up'|'down'|None"""
+    cam_kw = ["카메라", "cctv", "웹캠", "팬틸트", "ptz", "카메"]
+    if not any(k in text.lower() for k in cam_kw):
+        return None
+    if any(k in text for k in ["왼쪽", "왼", "좌"]):
+        return "left"
+    if any(k in text for k in ["오른쪽", "오른", "우"]):
+        return "right"
+    if any(k in text for k in ["위로", "위", "올려", "상"]):
+        return "up"
+    if any(k in text for k in ["아래로", "아래", "내려", "하"]):
+        return "down"
+    return None
+
+
+def _format_torch_result(result: dict, action: str) -> str:
+    if result.get("success"):
+        return f"플래시라이트를 {'켰습니다' if action == 'on' else '껐습니다'}."
+    return f"플래시라이트 제어 실패: {result.get('error', '알 수 없는 오류')}"
+
+
+def _format_servo_result(result: dict) -> str:
+    if result.get("success"):
+        label = {"left": "왼쪽", "right": "오른쪽", "up": "위", "down": "아래"}.get(result.get("direction", ""), "")
+        return f"카메라를 {label}으로 이동했습니다."
+    return f"카메라 이동 실패: {result.get('error', '알 수 없는 오류')}"
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -1375,6 +1481,18 @@ def chat():
         is_on = _is_aircon_on()
         reply = "에어컨이 현재 켜져 있는 것으로 보입니다." if is_on else "에어컨이 현재 꺼져 있는 것으로 보입니다."
         return jsonify({"reply": reply})
+
+    # ── Fast path T: 플래시라이트 제어 ──
+    torch_action = _detect_torch_command(user_message)
+    if torch_action:
+        result = tool_control_torch({"action": torch_action})
+        return jsonify({"reply": _format_torch_result(result, torch_action)})
+
+    # ── Fast path P: Pan-Tilt 서보 제어 ──
+    servo_dir = _detect_servo_command(user_message)
+    if servo_dir:
+        result = tool_control_servo({"direction": servo_dir})
+        return jsonify({"reply": _format_servo_result(result)})
 
     # ── LLM path: 에어컨 제어·시스템 상태·추론·대화 ─────────────────────────
     now           = datetime.now()
