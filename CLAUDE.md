@@ -177,9 +177,11 @@ pip install google-genai python-dotenv
 
 `.env` 파일에 `GEMINI_API_KEY=...` 필수 (`.env.example` 참고). 무료 한도: 1,500 RPD / 15 RPM.
 
-**시리얼 포트 접근**: chatbot.py는 시리얼 포트를 직접 열지 않는다. 모든 Arduino 통신은 app.py의 내부 API 경유.
+**시리얼 포트 접근**: chatbot.py는 시리얼 포트를 직접 열지 않는다. 모든 하드웨어 제어는 app.py의 내부 API 경유.
 - `_is_aircon_on()` → `GET http://localhost:5000/api/internal/aircon-status`
 - `tool_control_aircon()` → `POST http://localhost:5000/api/internal/arduino/send`
+- `tool_control_torch()` → `POST http://localhost:5000/api/internal/torch`
+- `tool_control_servo()` → `POST http://localhost:5000/api/internal/servo/move`
 
 **Fast path 구조** (LLM 미호출):
 
@@ -194,6 +196,9 @@ pip install google-genai python-dotenv
 | G | 에어컨 몇 번 켰어? | COUNT(*) 쿼리 |
 | H | 에어컨 예약 (N시간 후/N시에) | `aircon_schedule` DB 직접 조작 |
 | I | 에어컨 켜져 있어? | `_is_aircon_on()` → 내부 API → 빛센서 |
+| T | 플래시라이트 켜줘/꺼줘 | 내부 API → S20 torch-server 프록시 |
+| P | 카메라 왼쪽/오른쪽/위/아래 | 내부 API → 서보 Arduino 시리얼 |
+| V | 방 어때 / 불 켜져 있어? 등 시각 질문 | mjpg_streamer 스냅샷 → Gemini 멀티모달 |
 
 **시간 파싱** (`_detect_time_context`, `_parse_schedule_datetime`):
 - 지원: `YYYY년MM월DD일`, `YY년도MM월`, `N시간 전/후`, `N분 전/후`, `한/두/세 시간 전/후`, `방금`, `아까`, `어제`, `오늘`, `최근N시간`, `밤/저녁/오전 N시`, `내일 N시`

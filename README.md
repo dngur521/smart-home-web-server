@@ -118,6 +118,10 @@ python3 app.py
 | DELETE | `/api/schedule/aircon/bulk`           |  ✓   | 예약 일괄 삭제 (`status`, `older_than_days` 필터) |
 | POST   | `/api/torch`                          |  ✓   | S20 플래시라이트 제어 (`{"action":"on"/"off"}`)   |
 | POST   | `/rtc-offer`                          |  ✓   | WebRTC 시그널링 (SDP offer → answer, 포트 8083)   |
+| GET    | `/api/internal/aircon-status`         |  ✗   | chatbot.py 전용 내부 API (localhost만 허용)        |
+| POST   | `/api/internal/arduino/send`          |  ✗   | chatbot.py 전용 내부 API (localhost만 허용)        |
+| POST   | `/api/internal/torch`                 |  ✗   | chatbot.py 전용 내부 API (localhost만 허용)        |
+| POST   | `/api/internal/servo/move`            |  ✗   | chatbot.py 전용 내부 API (localhost만 허용)        |
 
 ---
 
@@ -166,7 +170,7 @@ bash monitor.sh
 | 이름 | 역할 | 포트 |
 | ---- | ---- | ---- |
 | `backend` | Flask API 서버 | 5000 |
-| `chatbot` | AI 챗봇 서버 (`chatbot.py`, Google Gemini API) | 5001 |
+| `chatbot` | AI 챗봇 서버 (`chatbot.py`, Google Gemini API, 비전 분석 포함) | 5001 |
 | `cctv` | mjpg_streamer (Logitech C270, MJPG 1280x960 30fps) | 8080 |
 | `audio-rtc` | WebRTC 오디오 스트림 (`audio_webrtc.py`, Opus, ~50ms 딜레이) | 8083 |
 | `ttyd` | 웹 콘솔 (`--writable --base-path /console-ws`) | 7681 |
