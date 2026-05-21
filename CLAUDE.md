@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Flask-based smart home backend server designed to run on a **Raspberry Pi 5**. It consolidates what was previously a Node.js server and a separate Python hardware script into a single `app.py`. It serves a pre-built React app from `dist/` and exposes REST APIs for hardware control, sensor data, user auth, and system monitoring.
 
-A **Wemos D1 (ESP8266)** module running `Sensor/Sensor.ino` connects to the local WiFi and serves PMS7003 dust sensor data at `http://<IP>/dust`. The Raspberry Pi backend polls this endpoint every 5 minutes.
+A **Wemos D1 (ESP8266)** module running `Arduino/Sensor/Sensor.ino` connects to the local WiFi and serves PMS7003 dust sensor data at `http://<IP>/dust`. The Raspberry Pi backend polls this endpoint every 5 minutes.
 
 ## Running the Server
 
@@ -144,7 +144,7 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 
 ## Servo.ino (Pan-Tilt 서보)
 
-위치: `Servo/Servo.ino`
+위치: `Arduino/Servo/Servo.ino`
 
 - Pan(좌우): 핀 9 / Tilt(상하): 핀 10 — 연속 회전형 서보
 - 시리얼 명령: `MOVE left/right/up/down`
@@ -153,7 +153,7 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 
 ## Sensor.ino (Wemos D1 / ESP8266)
 
-위치: `Sensor/Sensor.ino`
+위치: `Arduino/Sensor/Sensor.ino`
 
 - PMS7003 미세먼지 센서: SoftwareSerial TX→D7(GPIO13), RX→D6(GPIO12)
 - `/dust` 엔드포인트로 `pm1_0`, `pm2_5`, `pm10` 반환

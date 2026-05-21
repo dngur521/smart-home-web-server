@@ -30,8 +30,8 @@
 | Arduino (USB) | 에어컨 IR 제어 (`/dev/arduino`, 영구 연결 + Lock) |
 | TENT6000 빛센서 | 에어컨 켜짐 감지 (Arduino A0, threshold ≥ 20) |
 | Logitech C270 (USB) | CCTV 웹캠 (`/dev/cctv`, udev 고정 심볼릭 링크, MJPG 1280x960 30fps) |
-| Arduino 클론 CH340 (USB) | Pan-Tilt 서보 제어 (`/dev/ttyUSB0`, `Servo/Servo.ino`) |
-| Wemos D1 (ESP8266) + PMS7003 | WiFi 미세먼지 센서 모듈 (`Sensor/Sensor.ino`) |
+| Arduino 클론 CH340 (USB) | Pan-Tilt 서보 제어 (`/dev/ttyUSB0`, `Arduino/Servo/Servo.ino`) |
+| Wemos D1 (ESP8266) + PMS7003 | WiFi 미세먼지 센서 모듈 (`Arduino/Sensor/Sensor.ino`) |
 | Galaxy S20 (Termux) | 플래시라이트 제어 (`S20_HOST`, `~/torch-server.py`) |
 
 Wemos D1은 독립적인 WiFi HTTP 서버로 동작하며, 라즈베리파이 백엔드가 5분 정각마다 `/dust` 엔드포인트를 폴링해서 DB에 저장한다. IP는 `192.168.0.38`로 정적 고정(`Sensor.ino` 내 `WiFi.config()`).
