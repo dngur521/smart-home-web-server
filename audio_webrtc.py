@@ -3,7 +3,7 @@ import av
 from aiohttp import web
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 
-ALSA_DEVICE     = 'plughw:2,0'
+ALSA_DEVICE     = 'plughw:CARD=U0x46d0x825,DEV=0'
 PORT            = 8083
 FRONTEND_ORIGIN = os.environ.get('FRONTEND_ORIGIN', 'http://localhost:5173')
 SAMPLE_RATE     = 48000
