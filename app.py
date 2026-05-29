@@ -1813,7 +1813,6 @@ if __name__ == "__main__":
     print("Background sensor threads started (DHT22 + Dust).")
 
     # 에어컨 예약 스케줄러 — 1분마다 pending 항목 체크
-    global scheduler
     scheduler = BackgroundScheduler(daemon=True)
     scheduler.add_job(_check_aircon_schedules, "cron", second=0, id="aircon_scheduler")
     # 재부팅 스케줄 — 저장된 설정이 있으면 등록
