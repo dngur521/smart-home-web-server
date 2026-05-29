@@ -47,7 +47,7 @@ The entire backend is a **single file**: `app.py`. There are no modules or packa
 | 56–180 | Auth helpers: `get_db_connection()`, `login_required` decorator, token helpers, cookie helpers |
 | 182–280 | Hardware: `send_command_to_arduino()`, `_schedule_next_5min()`, `read_and_save_dht_data_task()`, `read_and_save_dust_data_task()` |
 | 280–600 | Arduino/sensor API endpoints |
-| 600~ | React SPA catch-all, user auth/profile endpoints, system stats, CCTV config API |
+| 600~ | React SPA catch-all, user auth/profile endpoints, system stats, CCTV config API, reboot schedule API |
 
 ### Background Tasks
 
@@ -57,9 +57,12 @@ The entire backend is a **single file**: `app.py`. There are no modules or packa
 - `read_and_save_dust_data_task()` — Wemos D1의 `/dust` 엔드포인트 GET 후 `dust_data` 저장
 - `_schedule_next_5min(fn)` — 다음 5분 정각까지 남은 시간을 계산해 `threading.Timer`로 예약하는 공통 헬퍼
 
-APScheduler `BackgroundScheduler`가 **매분 정각**(cron `second=0`)에 실행된다.
+APScheduler `BackgroundScheduler`가 실행하는 cron job 목록:
 
-- `_check_aircon_schedules()` — `aircon_schedule`에서 `status='pending' AND scheduled_at <= NOW()` 항목을 조회해 Arduino로 명령 전송 후 `status='done'` 업데이트
+- `_check_aircon_schedules()` — **매분 정각**(`second=0`): `aircon_schedule`에서 `status='pending' AND scheduled_at <= NOW()` 항목 조회 → Arduino 명령 전송 → `status='done'`
+- `_do_reboot()` — **매일 지정 시각**(사용자 설정): `sudo reboot` 실행. `reboot_schedule.json`에서 `enabled/hour/minute` 로드. 서버 시작 시 `_apply_reboot_schedule()`로 job 등록, API 호출 시 동적 갱신.
+
+`scheduler` 전역 변수 주의: 모듈 레벨에서 타입 어노테이션(`scheduler: BackgroundScheduler | None = None`)이 있으면 함수/블록 안에서 `global scheduler` 선언 불가 — Python이 "annotated name can't be global" SyntaxError를 냄. `if __name__ == '__main__':` 블록은 이미 모듈 스코프라 `global` 불필요.
 
 ### Authentication Flow
 

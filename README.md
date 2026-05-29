@@ -16,7 +16,7 @@
 - **requests** — Wemos D1 미세먼지 센서 HTTP 폴링
 - **pyserial** — Arduino 시리얼 통신 (`/dev/arduino`, udev 고정 심볼릭 링크)
 - **bcrypt / PyJWT** — 비밀번호 해싱 및 JWT 인증
-- **APScheduler** — 에어컨 예약 실행 (매분 정각 cron 트리거)
+- **APScheduler** — 에어컨 예약 실행 (매분 정각 cron) + 예약 재부팅 (매일 지정 시각 cron)
 - **google-genai** (gemini-2.5-flash) — AI 챗봇 (`chatbot.py`, 무료 API)
 
 ---
@@ -53,6 +53,8 @@ Wemos D1은 독립적인 WiFi HTTP 서버로 동작하며, 라즈베리파이 �
 테이블(`history`, `sensor_data`, `users`, `dust_data`, `aircon_schedule`)은 서버 시작 시 자동 생성된다.
 
 `cctv_config.json`은 `POST /api/system/cctv/config` 최초 호출 시 자동 생성된다. 없으면 기본값 `1280x960 @ 30fps`로 동작한다.
+
+`reboot_schedule.json`은 `POST /api/system/reboot-schedule` 최초 호출 시 자동 생성된다. 없으면 `enabled: false`(비활성)로 동작한다.
 
 ---
 
@@ -112,6 +114,8 @@ python3 app.py
 | GET    | `/api/system/stats`                   |  ✓   | CPU / RAM / 디스크 / 네트워크 통계          |
 | GET    | `/api/system/cctv/config`             |  ✓   | 현재 CCTV 해상도/FPS 및 지원 옵션 조회      |
 | POST   | `/api/system/cctv/config`             |  ✓   | CCTV 해상도/FPS 변경 (mjpg_streamer 재시작) |
+| GET    | `/api/system/reboot-schedule`         |  ✓   | 예약 재부팅 설정 조회 (`enabled`, `hour`, `minute`) |
+| POST   | `/api/system/reboot-schedule`         |  ✓   | 예약 재부팅 설정 (`{"enabled":true,"hour":4,"minute":0}`) — `reboot_schedule.json` 저장, APScheduler 즉시 갱신 |
 | POST   | `/api/schedule/aircon`                |  ✓   | 에어컨 예약 등록 (`action`, `scheduled_at`, `temperature`, `mode`, `wind`) |
 | GET    | `/api/schedule/aircon`                |  ✓   | 에어컨 예약 목록 전체 조회                  |
 | DELETE | `/api/schedule/aircon/:id`            |  ✓   | 특정 예약 취소 (status → cancelled)         |
