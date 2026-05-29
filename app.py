@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
+import select
 import board
 import adafruit_dht
 import bcrypt  # 비밀번호 해싱/검증
@@ -60,16 +61,24 @@ _servo_conn: serial.Serial | None = None
 _servo_lock = threading.Lock()
 
 
+_SERIAL_TIMEOUT = 5  # USB 끊김 시 readline()이 OS 레벨에서 영원히 블로킹되는 것을 방지
+
 def _arduino_cmd(command: str) -> str:
     """Lock으로 동기화된 아두이노 시리얼 통신. 연결이 끊기면 재연결."""
     global _serial_conn
     with _serial_lock:
         try:
             if _serial_conn is None or not _serial_conn.is_open:
-                _serial_conn = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=3)
+                _serial_conn = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=_SERIAL_TIMEOUT)
                 time.sleep(2)  # 최초 연결 시 아두이노 리셋 대기
                 _serial_conn.reset_input_buffer()  # 리셋 중 쌓인 garbage 제거
             _serial_conn.write(f"{command}\n".encode("utf-8"))
+            # select()로 하드 타임아웃: USB 연결이 끊겨도 readline()이 블로킹되지 않음
+            ready, _, _ = select.select([_serial_conn.fileno()], [], [], _SERIAL_TIMEOUT)
+            if not ready:
+                _serial_conn.close()
+                _serial_conn = None
+                raise TimeoutError(f"Arduino not responding to '{command}' within {_SERIAL_TIMEOUT}s")
             raw = _serial_conn.readline()
             try:
                 return raw.decode("utf-8").strip()
@@ -91,9 +100,14 @@ def _servo_cmd(command: str) -> None:
     with _servo_lock:
         try:
             if _servo_conn is None or not _servo_conn.is_open:
-                _servo_conn = serial.Serial(SERVO_PORT, BAUD_RATE, timeout=3)
+                _servo_conn = serial.Serial(SERVO_PORT, BAUD_RATE, timeout=_SERIAL_TIMEOUT)
                 time.sleep(2)
                 _servo_conn.reset_input_buffer()
+            _, writable, _ = select.select([], [_servo_conn.fileno()], [], _SERIAL_TIMEOUT)
+            if not writable:
+                _servo_conn.close()
+                _servo_conn = None
+                raise TimeoutError(f"Servo not writable within {_SERIAL_TIMEOUT}s")
             _servo_conn.write(f"{command}\n".encode("utf-8"))
         except Exception as e:
             if _servo_conn:
