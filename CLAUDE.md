@@ -135,6 +135,8 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 | GET | `/api/system/stats` | Yes | CPU/RAM/disk/network stats |
 | GET | `/api/system/cctv/config` | Yes | 현재 CCTV 해상도/FPS 및 지원 옵션 조회 |
 | POST | `/api/system/cctv/config` | Yes | CCTV 해상도/FPS 변경 (`{"resolution":"1280x960","fps":30}`) — mjpg_streamer pm2 재시작, `cctv_config.json` 저장 |
+| GET | `/api/system/reboot-schedule` | Yes | 재부팅 예약 설정 조회 (`enabled`, `hour`, `minute`) |
+| POST | `/api/system/reboot-schedule` | Yes | 재부팅 예약 설정 (`{"enabled":true,"hour":4,"minute":0}`) — APScheduler cron, `reboot_schedule.json` 저장, `sudo reboot` |
 | POST | `/api/schedule/aircon` | Yes | 에어컨 예약 등록 (`action`, `scheduled_at`, `temperature`, `mode`, `wind`) |
 | GET | `/api/schedule/aircon` | Yes | 에어컨 예약 목록 전체 조회 (scheduled_at ASC) |
 | DELETE | `/api/schedule/aircon/:id` | Yes | 특정 예약 취소 (pending → cancelled) |

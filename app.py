@@ -127,6 +127,7 @@ S20_HOST = os.environ.get("S20_HOST", "192.168.0.13:8282")
 
 # --- 설정: CCTV (mjpg_streamer) ---
 CCTV_CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cctv_config.json")
+REBOOT_SCHEDULE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reboot_schedule.json")
 CCTV_SUPPORTED_OPTIONS = [
     {"resolution": "160x120",  "fps": [30]},
     {"resolution": "176x144",  "fps": [30]},
@@ -164,6 +165,7 @@ CORS(
 )
 db_pool = None
 redis_client = None
+scheduler: BackgroundScheduler | None = None
 
 
 # --- 6. 인증/인가 헬퍼 함수 및 데코레이터 ---
@@ -1649,6 +1651,68 @@ def set_cctv_config():
     return jsonify({"status": "success", "data": {"resolution": resolution, "fps": fps}}), 200
 
 
+# --- 재부팅 스케줄 헬퍼 ---
+def _read_reboot_schedule():
+    try:
+        with open(REBOOT_SCHEDULE_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"enabled": False, "hour": 4, "minute": 0}
+
+
+def _write_reboot_schedule(config):
+    with open(REBOOT_SCHEDULE_FILE, "w") as f:
+        json.dump(config, f)
+
+
+def _do_reboot():
+    print("[reboot] scheduled reboot triggered", flush=True)
+    subprocess.Popen(["sudo", "reboot"])
+
+
+def _apply_reboot_schedule(cfg: dict) -> None:
+    """scheduler 전역에 재부팅 cron job을 등록/갱신/제거한다."""
+    global scheduler
+    if scheduler is None:
+        return
+    if scheduler.get_job("reboot_scheduler"):
+        scheduler.remove_job("reboot_scheduler")
+    if cfg.get("enabled"):
+        scheduler.add_job(
+            _do_reboot,
+            "cron",
+            hour=int(cfg["hour"]),
+            minute=int(cfg["minute"]),
+            id="reboot_scheduler",
+        )
+        print(f"[reboot] scheduled at {cfg['hour']:02d}:{cfg['minute']:02d} daily", flush=True)
+
+
+@app.route("/api/system/reboot-schedule", methods=["GET"])
+@login_required
+def get_reboot_schedule():
+    return jsonify({"status": "success", "data": _read_reboot_schedule()}), 200
+
+
+@app.route("/api/system/reboot-schedule", methods=["POST"])
+@login_required
+def set_reboot_schedule():
+    body = request.get_json(silent=True) or {}
+    enabled = bool(body.get("enabled", False))
+    try:
+        hour = int(body.get("hour", 4))
+        minute = int(body.get("minute", 0))
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "hour/minute는 정수여야 합니다."}), 400
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return jsonify({"status": "error", "message": "유효하지 않은 시간입니다."}), 400
+
+    cfg = {"enabled": enabled, "hour": hour, "minute": minute}
+    _write_reboot_schedule(cfg)
+    _apply_reboot_schedule(cfg)
+    return jsonify({"status": "success", "data": cfg}), 200
+
+
 @app.route("/api/torch", methods=["POST"])
 @login_required
 def torch_control():
@@ -1749,8 +1813,11 @@ if __name__ == "__main__":
     print("Background sensor threads started (DHT22 + Dust).")
 
     # 에어컨 예약 스케줄러 — 1분마다 pending 항목 체크
+    global scheduler
     scheduler = BackgroundScheduler(daemon=True)
     scheduler.add_job(_check_aircon_schedules, "cron", second=0, id="aircon_scheduler")
+    # 재부팅 스케줄 — 저장된 설정이 있으면 등록
+    _apply_reboot_schedule(_read_reboot_schedule())
     scheduler.start()
     print("Aircon schedule checker started (interval: 1 min).")
 
