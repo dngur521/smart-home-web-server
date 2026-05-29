@@ -74,12 +74,13 @@ APScheduler `BackgroundScheduler`가 **매분 정각**(cron `second=0`)에 실�
 - **Arduino**: serial on `/dev/arduino` at 9600 baud — **영구 연결(persistent)** + `threading.Lock` 동기화
   - udev 룰 `/etc/udev/rules.d/99-arduino.rules`로 `/dev/arduino` 고정 심볼릭 링크 (VID:2341/PID:0043, Arduino Uno 정품). ttyACM 번호 변동 무관.
   - `_arduino_cmd(command)` 헬퍼가 연결 관리. 첫 연결 시 2s 대기, 이후 ~20–50ms
+  - USB 끊김 대비: `select()`로 5초 하드 타임아웃 적용 — pyserial `timeout`은 USB 재연결 상황에서 OS 레벨 블로킹을 막지 못함
   - **Arduino 업로드 시 반드시 `pm2 stop backend` 먼저 실행** (포트 점유로 업로드 실패)
 - **TENT6000 빛센서**: Arduino A0 핀 연결. `LIGHT` 명령으로 5회 median 샘플 반환 (50ms). threshold ≥ 20 = ON
 - **Wemos D1 (ESP8266)**: WiFi HTTP server, polls `/dust` for PMS7003 data (`DUST_SENSOR_URL`)
   - 정적 IP `192.168.0.38` 고정 — `Sensor.ino`의 `WiFi.config()`로 설정 (DHCP 재할당 방지)
 - **서보 Arduino (Servo.ino)**: serial on `/dev/ttyUSB0` (CH340 클론) at 9600 baud — 영구 연결 + `threading.Lock`
-  - `_servo_cmd(command)` 헬퍼, 응답 없음 (write only)
+  - `_servo_cmd(command)` 헬퍼, 응답 없음 (write only). `select()`로 5초 write 타임아웃 적용
   - 명령: `MOVE left/right/up/down` — 연속 회전형 서보, 1회 명령 = 짧게 1회 구동
   - up/down은 하드웨어 배선 반전으로 백엔드에서 방향 swap (`up`→`down`, `down`→`up` 전송)
   - **업로드 시 반드시 `pm2 stop backend` 먼저 실행**
