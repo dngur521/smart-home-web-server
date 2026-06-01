@@ -1494,6 +1494,14 @@ def create_aircon_schedule():
         conn = db_pool.get_connection()
         cursor = conn.cursor(dictionary=True)
         cursor.execute(
+            "SELECT id FROM aircon_schedule WHERE scheduled_at=%s AND status='pending'",
+            (scheduled_at,),
+        )
+        if cursor.fetchone():
+            cursor.close()
+            conn.close()
+            return jsonify({"status": "error", "message": "이미 예약된 시간입니다."}), 409
+        cursor.execute(
             """INSERT INTO aircon_schedule (action, scheduled_at, temperature, mode, wind)
                VALUES (%s, %s, %s, %s, %s)""",
             (action, scheduled_at, temperature, mode, wind),
