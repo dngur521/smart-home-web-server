@@ -116,7 +116,7 @@ python3 app.py
 | POST   | `/api/system/cctv/config`             |  ✓   | CCTV 해상도/FPS 변경 (mjpg_streamer 재시작) |
 | GET    | `/api/system/reboot-schedule`         |  ✓   | 예약 재부팅 설정 조회 (`enabled`, `hour`, `minute`) |
 | POST   | `/api/system/reboot-schedule`         |  ✓   | 예약 재부팅 설정 (`{"enabled":true,"hour":4,"minute":0}`) — `reboot_schedule.json` 저장, APScheduler 즉시 갱신 |
-| POST   | `/api/schedule/aircon`                |  ✓   | 에어컨 예약 등록 (`action`, `scheduled_at`, `temperature`, `mode`, `wind`) |
+| POST   | `/api/schedule/aircon`                |  ✓   | 에어컨 예약 등록 (`action`, `scheduled_at`, `temperature`, `mode`, `wind`) — 과거 시각 400, 동일 시각 중복 409 |
 | GET    | `/api/schedule/aircon`                |  ✓   | 에어컨 예약 목록 전체 조회                  |
 | DELETE | `/api/schedule/aircon/:id`            |  ✓   | 특정 예약 취소 (status → cancelled)         |
 | DELETE | `/api/schedule/aircon/bulk`           |  ✓   | 예약 일괄 삭제 (`status`, `older_than_days` 필터) |

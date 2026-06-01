@@ -44,10 +44,24 @@ The entire backend is a **single file**: `app.py`. There are no modules or packa
 | Lines | Purpose |
 |-------|---------|
 | 1–55 | Config constants and global `app`, `db_pool`, `redis_client`, `DUST_SENSOR_URL`, `CCTV_CONFIG_FILE`, `CCTV_SUPPORTED_OPTIONS` |
-| 56–180 | Auth helpers: `get_db_connection()`, `login_required` decorator, token helpers, cookie helpers |
-| 182–280 | Hardware: `send_command_to_arduino()`, `_schedule_next_5min()`, `read_and_save_dht_data_task()`, `read_and_save_dust_data_task()` |
-| 280–600 | Arduino/sensor API endpoints |
-| 600~ | React SPA catch-all, user auth/profile endpoints, system stats, CCTV config API, reboot schedule API |
+| 56–250 | Auth helpers: `get_db_connection()`, DB 헬퍼 함수 5개, `login_required` decorator, token helpers, cookie helpers |
+| 250–360 | Hardware: `send_command_to_arduino()`, `_schedule_next_5min()`, `read_and_save_dht_data_task()`, `read_and_save_dust_data_task()` |
+| 360–800 | Arduino/sensor API endpoints |
+| 800~ | React SPA catch-all, user auth/profile endpoints, system stats, CCTV config API, reboot schedule API, aircon schedule API |
+
+### DB 헬퍼 함수
+
+`get_db_connection()` 바로 아래 5개의 공통 헬퍼가 정의되어 있다. 모든 DB 접근은 이 헬퍼를 통해 커넥션/커서 관리를 일원화한다.
+
+| 함수 | 반환 | 용도 |
+|------|------|------|
+| `_db_fetchone(query, params)` | `dict \| None` | SELECT 단일 행 |
+| `_db_fetchall(query, params)` | `list[dict]` | SELECT 다중 행 |
+| `_db_insert(query, params)` | `int` (lastrowid) | INSERT |
+| `_db_execute(query, params)` | `int` (rowcount) | UPDATE / DELETE |
+| `_record_history(command, response)` | `None` | `history` 테이블 기록 — `_db_insert` 래퍼, 에러는 출력만 하고 삼킴 |
+
+`send_command_to_arduino()`는 아두이노 응답 후 `_record_history()`를 호출한다. `_execute_aircon_schedule()`도 `send_command_to_arduino()` 경유이므로 별도 기록 불필요.
 
 ### Background Tasks
 
@@ -140,7 +154,7 @@ New users are created with `is_active = FALSE`; an admin must activate accounts 
 | POST | `/api/system/cctv/config` | Yes | CCTV 해상도/FPS 변경 (`{"resolution":"1280x960","fps":30}`) — mjpg_streamer pm2 재시작, `cctv_config.json` 저장 |
 | GET | `/api/system/reboot-schedule` | Yes | 재부팅 예약 설정 조회 (`enabled`, `hour`, `minute`) |
 | POST | `/api/system/reboot-schedule` | Yes | 재부팅 예약 설정 (`{"enabled":true,"hour":4,"minute":0}`) — APScheduler cron, `reboot_schedule.json` 저장, `sudo reboot` |
-| POST | `/api/schedule/aircon` | Yes | 에어컨 예약 등록 (`action`, `scheduled_at`, `temperature`, `mode`, `wind`) |
+| POST | `/api/schedule/aircon` | Yes | 에어컨 예약 등록 (`action`, `scheduled_at`, `temperature`, `mode`, `wind`) — 과거 시각 → 400, 동일 시각 pending 중복 → 409 |
 | GET | `/api/schedule/aircon` | Yes | 에어컨 예약 목록 전체 조회 (scheduled_at ASC) |
 | DELETE | `/api/schedule/aircon/:id` | Yes | 특정 예약 취소 (pending → cancelled) |
 | DELETE | `/api/schedule/aircon/bulk` | Yes | 예약 일괄 삭제 (`status`, `older_than_days` 필터, pending 제외) |
