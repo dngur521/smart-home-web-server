@@ -1044,6 +1044,8 @@ def tool_create_aircon_schedule(args: dict) -> dict:
     temperature  = args.get("temperature")
     mode         = args.get("mode")
     wind         = args.get("wind")
+    if isinstance(scheduled_at, datetime) and scheduled_at <= datetime.now():
+        return {"success": False, "message": "예약 시간은 현재 시각 이후여야 합니다."}
     try:
         conn   = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor(dictionary=True)

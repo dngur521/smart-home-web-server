@@ -702,46 +702,6 @@ def handle_get_dust_history_today():
             conn.close()
 
 
-@app.route("/api/sensor/dust", methods=["POST"])
-def receive_dust_data():
-    """ESP8266이 5분마다 미세먼지 데이터를 전송하는 수신 엔드포인트 (인증 없음)"""
-    data = request.get_json()
-    if not data:
-        return jsonify({"status": "error", "message": "No JSON body"}), 400
-
-    pm1_0 = data.get("pm1_0")
-    pm2_5 = data.get("pm2_5")
-    pm10 = data.get("pm10")
-
-    if pm1_0 is None or pm2_5 is None or pm10 is None:
-        return jsonify(
-            {"status": "error", "message": "pm1_0, pm2_5, pm10 are required"}
-        ), 400
-
-    conn = get_db_connection()
-    if conn is None:
-        return jsonify(
-            {"status": "error", "message": "Database connection failed."}
-        ), 500
-
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO dust_data (pm1_0, pm2_5, pm10, timestamp) VALUES (%s, %s, %s, NOW())",
-            (int(pm1_0), int(pm2_5), int(pm10)),
-        )
-        conn.commit()
-        print(f"Dust data saved: PM1.0={pm1_0} PM2.5={pm2_5} PM10={pm10}")
-        return jsonify({"status": "success"}), 201
-    except mysql.connector.Error as e:
-        print(f"DB error on /sensor/dust: {e}", file=sys.stderr)
-        return jsonify({"status": "error", "message": "Database error."}), 500
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
 
 @app.route("/api/arduino/dust-sensor", methods=["GET"])
 @login_required
@@ -1398,19 +1358,15 @@ def _execute_aircon_schedule(schedule):
     action = schedule["action"]
 
     if action == "off":
-        result = send_command_to_arduino("SEND 0,5")
-        _record_history("SEND 0,5", result.get("arduinoResponse", ""))
+        send_command_to_arduino("SEND 0,5")
     else:
         # 켜기: 먼저 전원 ON 후 2초 뒤 모드/온도/풍량 설정
-        on_result = send_command_to_arduino("SEND 1,5")
-        _record_history("SEND 1,5", on_result.get("arduinoResponse", ""))
+        send_command_to_arduino("SEND 1,5")
         time.sleep(2)
         idx = _aircon_cmd_index(
             schedule["mode"], schedule["wind"], schedule["temperature"]
         )
-        cmd = f"SEND {idx},5"
-        result = send_command_to_arduino(cmd)
-        _record_history(cmd, result.get("arduinoResponse", ""))
+        send_command_to_arduino(f"SEND {idx},5")
 
     conn = db_pool.get_connection()
     cursor = conn.cursor()
@@ -1422,21 +1378,6 @@ def _execute_aircon_schedule(schedule):
     conn.close()
     print(f"[scheduler] aircon_schedule id={sid} action={action} done")
 
-
-def _record_history(command, response):
-    """history 테이블에 에어컨 명령 기록"""
-    try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO history (command, response, timestamp) VALUES (%s, %s, NOW())",
-            (command, response),
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
-    except mysql.connector.Error as e:
-        print(f"[scheduler] history insert error: {e}", file=sys.stderr)
 
 
 def _check_aircon_schedules():
@@ -1476,6 +1417,9 @@ def create_aircon_schedule():
         scheduled_at = datetime.fromisoformat(scheduled_at_str)
     except ValueError:
         return jsonify({"status": "error", "message": "scheduled_at 형식이 올바르지 않습니다. (ISO 8601)"}), 400
+
+    if scheduled_at <= datetime.now():
+        return jsonify({"status": "error", "message": "예약 시간은 현재 시각 이후여야 합니다."}), 400
 
     temperature, mode, wind = None, None, None
     if action == "on":
@@ -1724,7 +1668,7 @@ def set_reboot_schedule():
 @app.route("/api/torch", methods=["POST"])
 @login_required
 def torch_control():
-    action = request.json.get("action")
+    action = (request.get_json(silent=True) or {}).get("action")
     if action not in ("on", "off"):
         return jsonify({"error": "invalid action"}), 400
     try:
