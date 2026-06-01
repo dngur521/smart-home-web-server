@@ -192,6 +192,65 @@ def get_db_connection():
         return None
 
 
+# --- DB 헬퍼 함수 ---
+def _db_fetchone(query: str, params=None) -> dict | None:
+    conn = db_pool.get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(query, params or ())
+        return cursor.fetchone()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _db_fetchall(query: str, params=None) -> list:
+    conn = db_pool.get_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(query, params or ())
+        return cursor.fetchall()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _db_insert(query: str, params=None) -> int:
+    """INSERT 실행 후 lastrowid 반환"""
+    conn = db_pool.get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(query, params or ())
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _db_execute(query: str, params=None) -> int:
+    """UPDATE/DELETE 실행 후 rowcount 반환"""
+    conn = db_pool.get_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(query, params or ())
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def _record_history(command: str, response: str) -> None:
+    try:
+        _db_insert(
+            "INSERT INTO history (command, response, timestamp) VALUES (%s, %s, NOW())",
+            (command, response),
+        )
+    except mysql.connector.Error as e:
+        print(f"DB error saving history: {e}", file=sys.stderr)
+
+
 def login_required(f):
     """JWT 토큰을 검증하고 사용자 ID를 요청 객체에 저장하는 데코레이터"""
 
@@ -287,33 +346,13 @@ def send_command_to_arduino(command):
         print(f"Serial Error: {e}", file=sys.stderr)
         return {"status": "error", "message": f"Error communicating with Arduino: {e}"}
 
-    try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO history (command, response, timestamp) VALUES (%s, %s, NOW())",
-            (command, response),
-        )
-        conn.commit()
-    except mysql.connector.Error as e:
-        print(f"DB error saving history: {e}", file=sys.stderr)
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
-
-    return {
-        "status": "success",
-        "message": "Command sent to Arduino.",
-        "arduinoResponse": response,
-    }
+    _record_history(command, response)
+    return {"status": "success", "message": "Command sent to Arduino.", "arduinoResponse": response}
 
 
 # --- 2. 백그라운드 센서 데이터 저장 ---
 def read_and_save_dht_data_task():
     """5분마다 온습도 센서 데이터를 읽고 원격 DB에 저장하는 백그라운드 작업"""
-    global db_pool
     temperature, humidity = None, None
     for _ in range(5):
         try:
@@ -327,27 +366,15 @@ def read_and_save_dht_data_task():
         if humidity is not None and temperature is not None:
             temperature = round(temperature, 1)
             humidity = round(humidity, 1)
-
-            # DB 풀에서 커넥션 가져오기
-            conn = db_pool.get_connection()
-            cursor = conn.cursor()
-            query = "INSERT INTO sensor_data (temperature, humidity, timestamp) VALUES (%s, %s, NOW())"
-            cursor.execute(query, (temperature, humidity))
-            conn.commit()
-            print(
-                f"Background sensor data saved: Temp={temperature}°C, Humidity={humidity}%"
+            _db_insert(
+                "INSERT INTO sensor_data (temperature, humidity, timestamp) VALUES (%s, %s, NOW())",
+                (temperature, humidity),
             )
+            print(f"Background sensor data saved: Temp={temperature}°C, Humidity={humidity}%")
         else:
             print("Background sensor read failed. Retrying...")
-    except mysql.connector.Error as e:
-        print(f"Background DB error: {e}", file=sys.stderr)
     except Exception as e:
         print(f"Background sensor read error: {e}", file=sys.stderr)
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()  # 커넥션을 풀에 반환
 
     _schedule_next_5min(read_and_save_dht_data_task)
 
@@ -368,36 +395,22 @@ def _schedule_next_5min(task_fn):
 
 def read_and_save_dust_data_task():
     """5분 정각마다 Wemos D1의 /dust 엔드포인트를 GET해서 dust_data 테이블에 저장"""
-    global db_pool
     try:
         resp = requests.get(DUST_SENSOR_URL, timeout=5)
         resp.raise_for_status()
         data = resp.json()
-
         if data.get("status") != "success":
             print(f"Dust sensor returned error: {data}", file=sys.stderr)
         else:
-            conn = db_pool.get_connection()
-            cursor = conn.cursor()
-            cursor.execute(
+            _db_insert(
                 "INSERT INTO dust_data (pm1_0, pm2_5, pm10, timestamp) VALUES (%s, %s, %s, NOW())",
                 (data["pm1_0"], data["pm2_5"], data["pm10"]),
             )
-            conn.commit()
-            print(
-                f"Dust data saved: PM1.0={data['pm1_0']} PM2.5={data['pm2_5']} PM10={data['pm10']}"
-            )
+            print(f"Dust data saved: PM1.0={data['pm1_0']} PM2.5={data['pm2_5']} PM10={data['pm10']}")
     except requests.RequestException as e:
         print(f"Dust sensor fetch error: {e}", file=sys.stderr)
-    except mysql.connector.Error as e:
-        print(f"DB error saving dust data: {e}", file=sys.stderr)
     except Exception as e:
         print(f"Unexpected error in dust task: {e}", file=sys.stderr)
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
 
     _schedule_next_5min(read_and_save_dust_data_task)
 
@@ -447,152 +460,73 @@ def handle_get_sensor_data():
 @login_required
 def handle_get_dht_history():
     """원격 DB에서 온습도 히스토리 조회 (페이지네이션)"""
-    global db_pool
     try:
         page = int(request.args.get("page", 1))
         limit = int(request.args.get("limit", 10))
         offset = (page - 1) * limit
-
-        conn = db_pool.get_connection()
-        cursor = conn.cursor(dictionary=True)  # 결과를 dict 형태로 받음
-
-        # 데이터 조회
-        query = "SELECT * FROM sensor_data ORDER BY id DESC LIMIT %s OFFSET %s"
-        cursor.execute(query, (limit, offset))
-        rows = format_rows_datetime(cursor.fetchall())
-
-        # 전체 카운트 조회
-        total_query = "SELECT COUNT(*) AS count FROM sensor_data"
-        cursor.execute(total_query)
-        total_count = cursor.fetchone()["count"]
-
-        return jsonify(
-            {
-                "data": rows,
-                "total": total_count,
-                "page": page,
-                "limit": limit,
-                "status": "success",
-            }
-        ), 200
+        rows = format_rows_datetime(_db_fetchall(
+            "SELECT * FROM sensor_data ORDER BY id DESC LIMIT %s OFFSET %s", (limit, offset)
+        ))
+        total = _db_fetchone("SELECT COUNT(*) AS count FROM sensor_data")["count"]
+        return jsonify({"status": "success", "data": rows, "total": total, "page": page, "limit": limit}), 200
     except mysql.connector.Error as e:
         print(f"Database error on /dht-history: {e}", file=sys.stderr)
-        return jsonify(
-            {"status": "error", "message": "Failed to fetch sensor data."}
-        ), 500
+        return jsonify({"status": "error", "message": "Failed to fetch sensor data."}), 500
     except Exception as e:
         print(f"Error on /dht-history: {e}", file=sys.stderr)
         return jsonify({"status": "error", "message": "Internal server error."}), 500
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
 
 
 @app.route("/api/arduino/dht-history/today", methods=["GET"])
 @login_required
 def handle_get_dht_history_today():
     """오늘 날짜(로컬 시간 기준) 온습도 기록 전체 조회 — timestamp ASC"""
-    global db_pool
     try:
-        today = datetime.now().date()
-        conn = db_pool.get_connection()
-        cursor = conn.cursor(dictionary=True)
-        query = """
-            SELECT * FROM sensor_data
-            WHERE DATE(timestamp) = %s
-            ORDER BY timestamp ASC
-        """
-        cursor.execute(query, (today,))
-        rows = format_rows_datetime(cursor.fetchall())
+        rows = format_rows_datetime(_db_fetchall(
+            "SELECT * FROM sensor_data WHERE DATE(timestamp) = %s ORDER BY timestamp ASC",
+            (datetime.now().date(),),
+        ))
         return jsonify({"status": "success", "data": rows}), 200
-    except mysql.connector.Error as e:
-        print(f"Database error on /dht-history/today: {e}", file=sys.stderr)
-        return jsonify(
-            {"status": "error", "message": "Failed to fetch today's sensor data."}
-        ), 500
     except Exception as e:
         print(f"Error on /dht-history/today: {e}", file=sys.stderr)
         return jsonify({"status": "error", "message": "Internal server error."}), 500
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
 
 
 @app.route("/api/arduino/aircon-history", methods=["GET"])
 @login_required
 def handle_get_aircon_history():
     """원격 DB에서 에어컨 제어 히스토리 조회 (페이지네이션)"""
-    global db_pool
     try:
         page = int(request.args.get("page", 1))
         limit = int(request.args.get("limit", 10))
         offset = (page - 1) * limit
-
-        conn = db_pool.get_connection()
-        cursor = conn.cursor(dictionary=True)
-
-        # 데이터 조회
-        query = "SELECT * FROM history ORDER BY id DESC LIMIT %s OFFSET %s"
-        cursor.execute(query, (limit, offset))
-        rows = format_rows_datetime(cursor.fetchall())
-
-        # 전체 카운트 조회
-        total_query = "SELECT COUNT(*) AS count FROM history"
-        cursor.execute(total_query)
-        total_count = cursor.fetchone()["count"]
-
-        return jsonify(
-            {
-                "data": rows,
-                "total": total_count,
-                "page": page,
-                "limit": limit,
-                "status": "success",
-            }
-        ), 200
+        rows = format_rows_datetime(_db_fetchall(
+            "SELECT * FROM history ORDER BY id DESC LIMIT %s OFFSET %s", (limit, offset)
+        ))
+        total = _db_fetchone("SELECT COUNT(*) AS count FROM history")["count"]
+        return jsonify({"status": "success", "data": rows, "total": total, "page": page, "limit": limit}), 200
     except mysql.connector.Error as e:
         print(f"Database error on /aircon-history: {e}", file=sys.stderr)
-        return jsonify(
-            {"status": "error", "message": "Failed to fetch aircon history."}
-        ), 500
+        return jsonify({"status": "error", "message": "Failed to fetch aircon history."}), 500
     except Exception as e:
         print(f"Error on /aircon-history: {e}", file=sys.stderr)
         return jsonify({"status": "error", "message": "Internal server error."}), 500
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
 
 
 def _seek_page(table, timestamp_str, limit):
     """주어진 timestamp에 가장 가까운 레코드가 속한 페이지 번호를 반환하는 내부 헬퍼"""
     try:
-        # ISO 8601 파싱 (Z → +00:00 변환 후 KST로 변환)
         ts = datetime.fromisoformat(timestamp_str.replace("Z", "+00:00"))
         ts_kst = ts.astimezone(timezone(timedelta(hours=9))).replace(tzinfo=None)
     except ValueError:
         return None, "Invalid timestamp format. Use ISO 8601."
-
     try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
         # DESC 정렬 기준: target_ts보다 최신인 레코드 수 = offset
-        cursor.execute(f"SELECT COUNT(*) FROM {table} WHERE timestamp > %s", (ts_kst,))
-        offset = cursor.fetchone()[0]
-        page = (offset // limit) + 1
+        row = _db_fetchone(f"SELECT COUNT(*) AS cnt FROM {table} WHERE timestamp > %s", (ts_kst,))
+        page = (row["cnt"] // limit) + 1
         return page, None
     except mysql.connector.Error as e:
         return None, str(e)
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
 
 
 @app.route("/api/arduino/dht-history/seek", methods=["GET"])
@@ -631,35 +565,26 @@ def handle_aircon_history_seek():
 @login_required
 def handle_get_dust_history():
     """미세먼지 이력 조회 (페이지네이션 or from/to 범위 조회)"""
-    global db_pool
     try:
         from_str = request.args.get("from")
         to_str   = request.args.get("to")
-
-        conn   = db_pool.get_connection()
-        cursor = conn.cursor(dictionary=True)
-
         if from_str and to_str:
             kst = timezone(timedelta(hours=9))
             from_kst = datetime.fromisoformat(from_str.replace("Z", "+00:00")).astimezone(kst).replace(tzinfo=None)
             to_kst   = datetime.fromisoformat(to_str.replace("Z", "+00:00")).astimezone(kst).replace(tzinfo=None)
-            cursor.execute(
+            rows = format_rows_datetime(_db_fetchall(
                 "SELECT * FROM dust_data WHERE timestamp >= %s AND timestamp <= %s ORDER BY timestamp ASC",
                 (from_kst, to_kst),
-            )
-            rows = format_rows_datetime(cursor.fetchall())
+            ))
             return jsonify({"status": "success", "data": rows}), 200
 
         page   = int(request.args.get("page", 1))
         limit  = int(request.args.get("limit", 10))
         offset = (page - 1) * limit
-
-        cursor.execute("SELECT * FROM dust_data ORDER BY id DESC LIMIT %s OFFSET %s", (limit, offset))
-        rows = format_rows_datetime(cursor.fetchall())
-
-        cursor.execute("SELECT COUNT(*) AS count FROM dust_data")
-        total = cursor.fetchone()["count"]
-
+        rows  = format_rows_datetime(_db_fetchall(
+            "SELECT * FROM dust_data ORDER BY id DESC LIMIT %s OFFSET %s", (limit, offset)
+        ))
+        total = _db_fetchone("SELECT COUNT(*) AS count FROM dust_data")["count"]
         return jsonify({"status": "success", "data": rows, "total": total, "page": page, "limit": limit}), 200
     except mysql.connector.Error as e:
         print(f"DB error on /dust-history: {e}", file=sys.stderr)
@@ -667,39 +592,21 @@ def handle_get_dust_history():
     except Exception as e:
         print(f"Error on /dust-history: {e}", file=sys.stderr)
         return jsonify({"status": "error", "message": "Internal server error."}), 500
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
 
 
 @app.route("/api/arduino/dust-history/today", methods=["GET"])
 @login_required
 def handle_get_dust_history_today():
     """오늘 날짜(로컬 시간 기준) 미세먼지 기록 전체 조회 — timestamp ASC"""
-    global db_pool
     try:
-        today = datetime.now().date()
-        conn   = db_pool.get_connection()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(
+        rows = format_rows_datetime(_db_fetchall(
             "SELECT * FROM dust_data WHERE DATE(timestamp) = %s ORDER BY timestamp ASC",
-            (today,)
-        )
-        rows = format_rows_datetime(cursor.fetchall())
+            (datetime.now().date(),),
+        ))
         return jsonify({"status": "success", "data": rows}), 200
-    except mysql.connector.Error as e:
-        print(f"DB error on /dust-history/today: {e}", file=sys.stderr)
-        return jsonify({"status": "error", "message": "Failed to fetch today's dust data."}), 500
     except Exception as e:
         print(f"Error on /dust-history/today: {e}", file=sys.stderr)
         return jsonify({"status": "error", "message": "Internal server error."}), 500
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
 
 
 
@@ -707,28 +614,14 @@ def handle_get_dust_history_today():
 @login_required
 def handle_get_dust_sensor():
     """DB에서 최신 미세먼지 데이터 조회"""
-    conn = get_db_connection()
-    if conn is None:
-        return jsonify(
-            {"status": "error", "message": "Database connection failed."}
-        ), 500
     try:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM dust_data ORDER BY id DESC LIMIT 1")
-        row = cursor.fetchone()
+        row = _db_fetchone("SELECT * FROM dust_data ORDER BY id DESC LIMIT 1")
         if not row:
             return jsonify({"status": "error", "message": "No dust data yet."}), 503
-        return jsonify(
-            {"status": "success", "data": format_rows_datetime([row])[0]}
-        ), 200
+        return jsonify({"status": "success", "data": format_rows_datetime([row])[0]}), 200
     except mysql.connector.Error as e:
         print(f"DB error on /dust-sensor: {e}", file=sys.stderr)
         return jsonify({"status": "error", "message": "Database error."}), 500
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if conn:
-            conn.close()
 
 
 LIGHT_SENSOR_THRESHOLD = 20
@@ -825,16 +718,11 @@ def handle_internal_servo_move():
 @login_required
 def handle_environment_history():
     """온습도(sensor_data) + 미세먼지(dust_data)를 5분 버킷 기준 JOIN하여 반환 (페이지네이션)"""
-    global db_pool
     try:
         page = int(request.args.get("page", 1))
         limit = int(request.args.get("limit", 10))
         offset = (page - 1) * limit
-
-        conn = db_pool.get_connection()
-        cursor = conn.cursor(dictionary=True)
-
-        data_query = """
+        rows = format_rows_datetime(_db_fetchall("""
             SELECT
               FROM_UNIXTIME(FLOOR(UNIX_TIMESTAMP(timestamp) / 300) * 300) AS timestamp,
               MAX(temperature) AS temperature,
@@ -854,11 +742,8 @@ def handle_environment_history():
             GROUP BY FLOOR(UNIX_TIMESTAMP(timestamp) / 300)
             ORDER BY timestamp DESC
             LIMIT %s OFFSET %s
-        """
-        cursor.execute(data_query, (limit, offset))
-        rows = format_rows_datetime(cursor.fetchall())
-
-        count_query = """
+        """, (limit, offset)))
+        total = _db_fetchone("""
             SELECT COUNT(*) AS count FROM (
               SELECT DISTINCT FLOOR(UNIX_TIMESTAMP(timestamp) / 300) AS bucket
               FROM (
@@ -867,32 +752,14 @@ def handle_environment_history():
                 SELECT timestamp FROM dust_data
               ) all_ts
             ) cnt
-        """
-        cursor.execute(count_query)
-        total = cursor.fetchone()["count"]
-
-        return jsonify(
-            {
-                "status": "success",
-                "data": rows,
-                "total": total,
-                "page": page,
-                "limit": limit,
-            }
-        ), 200
+        """)["count"]
+        return jsonify({"status": "success", "data": rows, "total": total, "page": page, "limit": limit}), 200
     except mysql.connector.Error as e:
         print(f"DB error on /environment-history: {e}", file=sys.stderr)
-        return jsonify(
-            {"status": "error", "message": "Failed to fetch environment history."}
-        ), 500
+        return jsonify({"status": "error", "message": "Failed to fetch environment history."}), 500
     except Exception as e:
         print(f"Error on /environment-history: {e}", file=sys.stderr)
         return jsonify({"status": "error", "message": "Internal server error."}), 500
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
 
 
 
@@ -936,118 +803,44 @@ def serve_react_app(path):
 @app.route("/api/auth/register", methods=["POST"])
 def register():
     """회원가입: 사용자 이름, 비밀번호를 받아 해싱 후 DB에 저장"""
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     username = data.get("username")
     password = data.get("password")
-
     if not username or not password:
-        return jsonify(
-            {"status": "error", "message": "Username and password are required."}
-        ), 400
-
-    # 비밀번호 해싱 (UTF-8로 인코딩 후 해시)
-    hashed_password = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode(
-        "utf-8"
-    )
-
-    conn = get_db_connection()
-    if conn is None:
-        return jsonify(
-            {"status": "error", "message": "Database connection failed."}
-        ), 500
-
+        return jsonify({"status": "error", "message": "Username and password are required."}), 400
+    hashed_password = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
     try:
-        cursor = conn.cursor()
-        # 사용자 이름 중복 확인
-        cursor.execute("SELECT id FROM users WHERE username = %s", (username,))
-        if cursor.fetchone():
-            return jsonify(
-                {"status": "error", "message": "Username already exists."}
-            ), 409
-
-        # 사용자 정보 삽입
-        query = "INSERT INTO users (username, password_hash) VALUES (%s, %s)"
-        cursor.execute(query, (username, hashed_password))
-        conn.commit()
-
-        return jsonify(
-            {"status": "success", "message": "User registered successfully."}
-        ), 201
+        if _db_fetchone("SELECT id FROM users WHERE username = %s", (username,)):
+            return jsonify({"status": "error", "message": "Username already exists."}), 409
+        _db_insert("INSERT INTO users (username, password_hash) VALUES (%s, %s)", (username, hashed_password))
+        return jsonify({"status": "success", "message": "User registered successfully."}), 201
     except mysql.connector.Error as e:
         print(f"DB error on /register: {e}", file=sys.stderr)
-        return jsonify(
-            {"status": "error", "message": "Database error during registration."}
-        ), 500
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
+        return jsonify({"status": "error", "message": "Database error during registration."}), 500
 
 
 @app.route("/api/auth/login", methods=["POST"])
 def login():
     """로그인: 사용자 이름, 비밀번호 검증 후 Access Token 및 Refresh Token 발급"""
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     username = data.get("username")
     password = data.get("password")
-
-    conn = get_db_connection()
-    if conn is None:
-        return jsonify(
-            {"status": "error", "message": "Database connection failed."}
-        ), 500
-
     try:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(
-            "SELECT id, password_hash, is_active FROM users WHERE username = %s",
-            (username,),
+        user = _db_fetchone(
+            "SELECT id, password_hash, is_active FROM users WHERE username = %s", (username,)
         )
-        user = cursor.fetchone()
-
-        if user and bcrypt.checkpw(
-            password.encode("utf-8"), user["password_hash"].encode("utf-8")
-        ):
-            # 💡 계정 활성화 상태 확인 💡
-            # print(user.get('is_active'))
+        if user and bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
             if not user.get("is_active"):
-                return jsonify(
-                    {
-                        "status": "error",
-                        "message": "Account is inactive. Please contact the administrator.",
-                    }
-                ), 401
-            # 비밀번호 일치 -> JWT 토큰 및 Refresh Token 생성
-            user_id = user["id"]
-            access_token = create_access_token(user_id=user_id)
-            refresh_token = create_refresh_token(user_id=user_id)
-
+                return jsonify({"status": "error", "message": "Account is inactive. Please contact the administrator."}), 401
             response = make_response(
-                jsonify(
-                    {
-                        "status": "success",
-                        "message": "Login successful.",
-                        "expires_in_minutes": ACCESS_TOKEN_EXPIRE_MINUTES,
-                    }
-                ),
+                jsonify({"status": "success", "message": "Login successful.", "expires_in_minutes": ACCESS_TOKEN_EXPIRE_MINUTES}),
                 200,
             )
-            return set_token_cookies(response, access_token, refresh_token)
-        else:
-            return jsonify(
-                {"status": "error", "message": "Invalid username or password."}
-            ), 401
+            return set_token_cookies(response, create_access_token(user["id"]), create_refresh_token(user["id"]))
+        return jsonify({"status": "error", "message": "Invalid username or password."}), 401
     except mysql.connector.Error as e:
         print(f"DB error on /login: {e}", file=sys.stderr)
-        return jsonify(
-            {"status": "error", "message": "Database error during login."}
-        ), 500
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
+        return jsonify({"status": "error", "message": "Database error during login."}), 500
 
 
 @app.route("/api/auth/refresh", methods=["POST"])
@@ -1095,117 +888,49 @@ def refresh_token():
 @login_required
 def get_user_profile():
     """회원정보 조회: 로그인된 사용자의 정보 반환"""
-    user_id = request.user_id  # login_required 데코레이터가 요청 객체에 저장한 ID
-
-    conn = get_db_connection()
-    if conn is None:
-        return jsonify(
-            {"status": "error", "message": "Database connection failed."}
-        ), 500
-
     try:
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT id, username FROM users WHERE id = %s", (user_id,))
-        user = cursor.fetchone()
-
-        if user:
-            return jsonify({"status": "success", "user": user}), 200
-        else:
-            # 이 경우는 토큰이 유효했지만, DB에서 사용자가 삭제된 경우 (매우 드물게 발생)
+        user = _db_fetchone("SELECT id, username FROM users WHERE id = %s", (request.user_id,))
+        if not user:
             return jsonify({"status": "error", "message": "User not found."}), 404
+        return jsonify({"status": "success", "user": user}), 200
     except mysql.connector.Error as e:
         print(f"DB error on /profile: {e}", file=sys.stderr)
         return jsonify({"status": "error", "message": "Database error."}), 500
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
 
 
 @app.route("/api/user/update-password", methods=["PUT"])
 @login_required
 def update_password():
     """회원정보 수정 (비밀번호): 로그인된 사용자의 비밀번호 변경"""
-    user_id = request.user_id
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     new_password = data.get("new_password")
-
     if not new_password:
         return jsonify({"status": "error", "message": "New password is required."}), 400
-
-    # 새 비밀번호 해싱
-    hashed_password = bcrypt.hashpw(
-        new_password.encode("utf-8"), bcrypt.gensalt()
-    ).decode("utf-8")
-
-    conn = get_db_connection()
-    if conn is None:
-        return jsonify(
-            {"status": "error", "message": "Database connection failed."}
-        ), 500
-
+    hashed_password = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
     try:
-        cursor = conn.cursor()
-        query = "UPDATE users SET password_hash = %s WHERE id = %s"
-        cursor.execute(query, (hashed_password, user_id))
-        conn.commit()
-
-        if cursor.rowcount == 0:
-            return jsonify(
-                {"status": "error", "message": "User not found or password unchanged."}
-            ), 404
-
-        return jsonify(
-            {"status": "success", "message": "Password updated successfully."}
-        ), 200
+        affected = _db_execute(
+            "UPDATE users SET password_hash = %s WHERE id = %s", (hashed_password, request.user_id)
+        )
+        if affected == 0:
+            return jsonify({"status": "error", "message": "User not found or password unchanged."}), 404
+        return jsonify({"status": "success", "message": "Password updated successfully."}), 200
     except mysql.connector.Error as e:
         print(f"DB error on /update-password: {e}", file=sys.stderr)
-        return jsonify(
-            {"status": "error", "message": "Database error during update."}
-        ), 500
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
+        return jsonify({"status": "error", "message": "Database error during update."}), 500
 
 
 @app.route("/api/user/delete", methods=["DELETE"])
 @login_required
 def delete_user():
     """회원탈퇴: 로그인된 사용자 계정 삭제"""
-    user_id = request.user_id
-
-    conn = get_db_connection()
-    if conn is None:
-        return jsonify(
-            {"status": "error", "message": "Database connection failed."}
-        ), 500
-
     try:
-        cursor = conn.cursor()
-        # 사용자 레코드 삭제
-        cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
-        conn.commit()
-
-        if cursor.rowcount == 0:
+        affected = _db_execute("DELETE FROM users WHERE id = %s", (request.user_id,))
+        if affected == 0:
             return jsonify({"status": "error", "message": "User not found."}), 404
-
-        # React 클라이언트 측에서 토큰을 삭제하여 로그아웃 처리
-        return jsonify(
-            {"status": "success", "message": "Account deleted successfully."}
-        ), 200
+        return jsonify({"status": "success", "message": "Account deleted successfully."}), 200
     except mysql.connector.Error as e:
         print(f"DB error on /delete-user: {e}", file=sys.stderr)
-        return jsonify(
-            {"status": "error", "message": "Database error during deletion."}
-        ), 500
-    finally:
-        if "cursor" in locals() and cursor:
-            cursor.close()
-        if "conn" in locals() and conn:
-            conn.close()
+        return jsonify({"status": "error", "message": "Database error during deletion."}), 500
 
 
 @app.route("/api/auth/logout", methods=["POST"])
@@ -1356,26 +1081,14 @@ def _execute_aircon_schedule(schedule):
     """pending 상태인 예약 1건을 실행하고 status를 done으로 업데이트"""
     sid = schedule["id"]
     action = schedule["action"]
-
     if action == "off":
         send_command_to_arduino("SEND 0,5")
     else:
-        # 켜기: 먼저 전원 ON 후 2초 뒤 모드/온도/풍량 설정
         send_command_to_arduino("SEND 1,5")
         time.sleep(2)
-        idx = _aircon_cmd_index(
-            schedule["mode"], schedule["wind"], schedule["temperature"]
-        )
+        idx = _aircon_cmd_index(schedule["mode"], schedule["wind"], schedule["temperature"])
         send_command_to_arduino(f"SEND {idx},5")
-
-    conn = db_pool.get_connection()
-    cursor = conn.cursor()
-    cursor.execute(
-        "UPDATE aircon_schedule SET status='done' WHERE id=%s", (sid,)
-    )
-    conn.commit()
-    cursor.close()
-    conn.close()
+    _db_execute("UPDATE aircon_schedule SET status='done' WHERE id=%s", (sid,))
     print(f"[scheduler] aircon_schedule id={sid} action={action} done")
 
 
@@ -1383,15 +1096,9 @@ def _execute_aircon_schedule(schedule):
 def _check_aircon_schedules():
     """1분마다 실행: pending 예약 중 scheduled_at <= now() 인 항목 처리"""
     try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(
+        rows = _db_fetchall(
             "SELECT * FROM aircon_schedule WHERE status='pending' AND scheduled_at <= NOW()"
         )
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-
         for row in rows:
             try:
                 _execute_aircon_schedule(row)
@@ -1435,27 +1142,16 @@ def create_aircon_schedule():
             return jsonify({"status": "error", "message": "wind는 'auto', 'low', 'mid', 'high' 중 하나여야 합니다."}), 400
 
     try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(
+        if _db_fetchone(
             "SELECT id FROM aircon_schedule WHERE scheduled_at=%s AND status='pending'",
             (scheduled_at,),
-        )
-        if cursor.fetchone():
-            cursor.close()
-            conn.close()
+        ):
             return jsonify({"status": "error", "message": "이미 예약된 시간입니다."}), 409
-        cursor.execute(
-            """INSERT INTO aircon_schedule (action, scheduled_at, temperature, mode, wind)
-               VALUES (%s, %s, %s, %s, %s)""",
+        new_id = _db_insert(
+            "INSERT INTO aircon_schedule (action, scheduled_at, temperature, mode, wind) VALUES (%s, %s, %s, %s, %s)",
             (action, scheduled_at, temperature, mode, wind),
         )
-        conn.commit()
-        new_id = cursor.lastrowid
-        cursor.execute("SELECT * FROM aircon_schedule WHERE id=%s", (new_id,))
-        row = format_rows_datetime([cursor.fetchone()])[0]
-        cursor.close()
-        conn.close()
+        row = format_rows_datetime([_db_fetchone("SELECT * FROM aircon_schedule WHERE id=%s", (new_id,))])[0]
         return jsonify({"status": "success", "data": row}), 201
     except mysql.connector.Error as e:
         print(f"DB error on POST /schedule/aircon: {e}", file=sys.stderr)
@@ -1466,14 +1162,7 @@ def create_aircon_schedule():
 @login_required
 def list_aircon_schedules():
     try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute(
-            "SELECT * FROM aircon_schedule ORDER BY scheduled_at ASC"
-        )
-        rows = format_rows_datetime(cursor.fetchall())
-        cursor.close()
-        conn.close()
+        rows = format_rows_datetime(_db_fetchall("SELECT * FROM aircon_schedule ORDER BY scheduled_at ASC"))
         return jsonify({"status": "success", "data": rows}), 200
     except mysql.connector.Error as e:
         print(f"DB error on GET /schedule/aircon: {e}", file=sys.stderr)
@@ -1484,37 +1173,26 @@ def list_aircon_schedules():
 @login_required
 def bulk_delete_aircon_schedules():
     body = request.get_json(silent=True) or {}
-    status_filter = body.get("status")        # "cancelled" | "done" | None
-    older_than_days = body.get("older_than_days")  # int | None
+    status_filter   = body.get("status")
+    older_than_days = body.get("older_than_days")
 
     if status_filter and status_filter not in ("cancelled", "done"):
         return jsonify({"status": "error", "message": "status는 'cancelled' 또는 'done'만 허용됩니다."}), 400
 
     conditions = ["status != 'pending'"]
     params = []
-
     if status_filter:
         conditions.append("status = %s")
         params.append(status_filter)
-
     if older_than_days is not None:
         try:
-            days = int(older_than_days)
+            params.append(int(older_than_days))
         except (TypeError, ValueError):
             return jsonify({"status": "error", "message": "older_than_days는 정수여야 합니다."}), 400
         conditions.append("scheduled_at < NOW() - INTERVAL %s DAY")
-        params.append(days)
-
-    where_clause = " AND ".join(conditions)
 
     try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(f"DELETE FROM aircon_schedule WHERE {where_clause}", params)
-        conn.commit()
-        deleted = cursor.rowcount
-        cursor.close()
-        conn.close()
+        deleted = _db_execute(f"DELETE FROM aircon_schedule WHERE {' AND '.join(conditions)}", params)
         return jsonify({"status": "success", "deleted": deleted}), 200
     except mysql.connector.Error as e:
         print(f"DB error on DELETE /schedule/aircon/bulk: {e}", file=sys.stderr)
@@ -1525,17 +1203,10 @@ def bulk_delete_aircon_schedules():
 @login_required
 def cancel_aircon_schedule(schedule_id):
     try:
-        conn = db_pool.get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
+        affected = _db_execute(
             "UPDATE aircon_schedule SET status='cancelled' WHERE id=%s AND status='pending'",
             (schedule_id,),
         )
-        conn.commit()
-        affected = cursor.rowcount
-        cursor.close()
-        conn.close()
-
         if affected == 0:
             return jsonify({"status": "error", "message": "예약을 찾을 수 없거나 이미 완료/취소된 상태입니다."}), 404
         return jsonify({"status": "success"}), 200
