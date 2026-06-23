@@ -229,6 +229,29 @@ ln -s /usr/lib/python3/dist-packages/lgpio.py venv/lib/python3.13/site-packages/
 ln -s /usr/lib/python3/dist-packages/_lgpio.cpython-313-aarch64-linux-gnu.so venv/lib/python3.13/site-packages/
 ```
 
+## 서비스 자동 시작 (systemd)
+
+재부팅 후 서비스 기동 순서 문제를 방지하기 위해 두 가지 설정이 적용되어 있다.
+
+### pm2 (`/etc/systemd/system/pm2-kam5.service`)
+```ini
+[Unit]
+After=network.target mariadb.service redis.service
+Wants=mariadb.service redis.service
+```
+MariaDB·Redis가 완전히 뜬 후 pm2를 시작해 backend DB 연결 실패를 방지한다.
+
+### nginx (`/etc/systemd/system/nginx.service.d/override.conf`)
+```ini
+[Unit]
+After=network-online.target
+Wants=network-online.target
+```
+DNS가 완전히 준비된 후 nginx를 시작해 upstream 도메인 해석 실패를 방지한다.  
+(`network.target`만으로는 DNS 준비 전에 nginx가 시작될 수 있음)
+
+설정 변경 후 반드시 `sudo systemctl daemon-reload` 실행.
+
 ## monitor.sh
 
 Standalone shell script (not part of the Flask server) that prints a formatted system stats summary to the terminal using `vcgencmd`, `smartctl`, `free`, `iostat`, and `sar`. Requires `sysstat`, `bc`, and `smartmontools` packages.

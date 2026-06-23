@@ -169,6 +169,20 @@ JWT를 **HttpOnly 쿠키**로 관리한다.
 bash monitor.sh
 ```
 
+## 서비스 자동 시작 (systemd)
+
+재부팅 후 기동 순서 보장을 위해 두 systemd 설정이 적용되어 있다.
+
+| 파일 | 변경 내용 |
+| ---- | --------- |
+| `/etc/systemd/system/pm2-kam5.service` | `After=network.target mariadb.service redis.service` + `Wants=mariadb.service redis.service` |
+| `/etc/systemd/system/nginx.service.d/override.conf` | `After=network-online.target` + `Wants=network-online.target` |
+
+- **pm2**: MariaDB·Redis 준비 완료 후 시작 → backend DB 연결 실패 방지
+- **nginx**: DNS 완전 준비 후 시작 → upstream 도메인(`*.duckdns.org`) 해석 실패 방지
+
+설정 변경 시 `sudo systemctl daemon-reload` 필수.
+
 ## 서비스 구성 (pm2)
 
 | 이름 | 역할 | 포트 |
