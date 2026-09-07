@@ -7,7 +7,7 @@ Antigravity(Gemini) 에이전트를 위한 스마트홈 웹 서버 프로젝트 
 - **플랫폼**: 라즈베리파이 5 (Raspberry Pi 5) 기반 스마트홈 백엔드 시스템
 - **메인 백엔드**: `app.py` 단일 파일 Flask 서버 (포트 5000)
 - **프론트엔드**: React + Vite (`new-smart-app`), 빌드 결과물 `dist/`를 Flask가 직접 서빙
-- **AI 챗봇**: `chatbot.py` (포트 5001, Google Gemini 2.5 Flash, Python-first 아키텍처)
+- **AI 챗봇**: `chatbot.py` (포트 5001, Google Gemini `gemini-flash-latest`, 정형화된 JSON API 기반)
 - **CCTV 및 오디오**: Logitech C270 (`/dev/cctv`, mjpg_streamer 8080), WebRTC 오디오 (`audio_webrtc.py`, 포트 8083)
 - **DB / 캐시**: MariaDB (`smart_home`, user: master/1234), Redis (토큰 관리, 6379)
 - **프로세스 관리**: `pm2` (`backend`, `chatbot`, `cctv`, `audio-rtc`, `ttyd`)

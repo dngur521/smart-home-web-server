@@ -189,7 +189,7 @@ aiortc aiohttp av
 
 ### chatbot.py (AI 챗봇 서버, 포트 5001)
 
-**Google Gemini API** (`gemini-2.5-flash`) 기반 스마트홈 AI 어시스턴트. **Python-first 아키텍처** — 데이터 조회는 Python이 직접 처리하고, LLM은 추론/대화만 담당.
+**Google Gemini API** (`gemini-flash-latest`, 최신 Flash 모델) 기반 스마트홈 AI 어시스턴트. 정형화된 JSON API 기반 아키텍처.
 
 ```
 pip install google-genai python-dotenv

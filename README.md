@@ -17,7 +17,7 @@
 - **pyserial** — Arduino 시리얼 통신 (`/dev/arduino`, udev 고정 심볼릭 링크)
 - **bcrypt / PyJWT** — 비밀번호 해싱 및 JWT 인증
 - **APScheduler** — 에어컨 예약 실행 (매분 정각 cron) + 예약 재부팅 (매일 지정 시각 cron)
-- **google-genai** (gemini-2.5-flash) — AI 챗봇 (`chatbot.py`, 무료 API)
+- **google-genai** (`gemini-flash-latest`, Gemini 최신 Flash 모델) — AI 챗봇 (`chatbot.py`, 무료 API)
 
 ---
 
