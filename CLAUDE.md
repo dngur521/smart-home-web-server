@@ -203,25 +203,30 @@ pip install google-genai python-dotenv
 - `tool_control_torch()` → `POST http://localhost:5000/api/internal/torch`
 - `tool_control_servo()` → `POST http://localhost:5000/api/internal/servo/move`
 
-**Fast path 구조** (LLM 미호출):
+**아키텍처**: 모든 요청이 Gemini JSON API를 경유하는 2-pass 구조.
 
-| Path | 트리거 | 동작 |
-|------|--------|------|
-| A | 시간 표현 + 센서 키워드 | DB 직접 조회 후 템플릿 응답 |
-| B | 현재 온도/습도/미세먼지 | 최신 레코드 조회 |
-| C | 에어컨 제어 키워드 | Python 파서 → 내부 API 경유 전송 |
-| D/D2 | 환기/창문 / 에어컨 켜야 할까 | PM2.5/온도 규칙 기반 답변 |
-| E | 인사/감사 대화 | 고정 응답 |
-| F | 시스템 상태 키워드 | system stats 직접 조회 |
-| G | 에어컨 몇 번 켰어? | COUNT(*) 쿼리 |
-| H | 에어컨 예약 (N시간 후/N시에) | `aircon_schedule` DB 직접 조작 |
-| I | 에어컨 켜져 있어? | `_is_aircon_on()` → 내부 API → 빛센서 |
-| T | 플래시라이트 켜줘/꺼줘 | 내부 API → S20 torch-server 프록시 |
-| P | 카메라 왼쪽/오른쪽/위/아래 | 내부 API → 서보 Arduino 시리얼 |
-| V | 방 어때 / 불 켜져 있어? 등 시각 질문 | mjpg_streamer 스냅샷 → Gemini 멀티모달 |
+1. `_build_system_prompt()` — 실시간 센서값(온도/습도/미세먼지), 에어컨 상태, 대기 예약, 시스템 통계를 시스템 프롬프트에 주입
+2. `_call_gemini_json()` — `response_mime_type="application/json"`으로 Gemini 호출. 429 시 최대 3회 retry + `FALLBACK_MODEL`(`gemini-2.5-flash-lite`)로 자동 폴백
+3. `_execute_actions()` — Gemini가 반환한 `actions` 배열 순회 실행
+4. `_synthesize_with_gemini()` — DB 조회가 포함된 결과는 2-pass로 Gemini에게 자연어 합성 위임
 
-**시간 파싱** (`_detect_time_context`, `_parse_schedule_datetime`):
-- 지원: `YYYY년MM월DD일`, `YY년도MM월`, `N시간 전/후`, `N분 전/후`, `한/두/세 시간 전/후`, `방금`, `아까`, `어제`, `오늘`, `최근N시간`, `밤/저녁/오전 N시`, `내일 N시`
+**지원 액션 (11종)**:
+
+| 액션 | 동작 |
+|------|------|
+| `none` | 즉시 reply 텍스트로 답변 |
+| `control_aircon` | 에어컨 즉시 제어 (mode/temp/fan) |
+| `create_aircon_schedule` | 에어컨 예약 등록 |
+| `list_aircon_schedules` | 대기 중인 예약 목록 조회 |
+| `cancel_aircon_schedule` | 예약 취소 (id 지정 또는 단건 자동) |
+| `control_torch` | S20 플래시라이트 on/off |
+| `control_servo` | Pan-Tilt 카메라 방향 이동 |
+| `get_sensor_at` | 특정 시점 온습도/미세먼지 조회 |
+| `get_sensor_history` | 기간 통계 (평균/최저/최고) |
+| `get_aircon_history` | 에어컨 제어 이력/횟수 조회 |
+| `vision` | mjpg_streamer 스냅샷 → Gemini 멀티모달 분석 |
+
+복합 명령 지원: `actions` 배열에 여러 액션을 나열하면 순서대로 모두 실행됨.
 
 `lgpio`는 pip으로 설치 불가 (Pi 5). `sudo apt install python3-lgpio` 후 venv에 심볼릭 링크:
 ```bash

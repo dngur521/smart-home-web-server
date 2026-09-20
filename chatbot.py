@@ -244,31 +244,44 @@ def tool_get_sensor_at(sensor_type: str, target_time: datetime) -> str:
             return "해당 시각 근처 온도 데이터가 없습니다."
         return f"{time_desc} 온도는 {rows[0]['temperature']}°C입니다."
 
-def tool_get_sensor_history(sensor_type: str, start_time: datetime, end_time: datetime) -> str:
-    """특정 기간 통계 조회"""
+def tool_get_sensor_history(sensor_type: str, start_time: datetime, end_time: datetime) -> dict:
+    """특정 기간 통계 조회. dict 반환 (2단계 합성 시 원본 데이터 제공)"""
     if sensor_type == "dust":
         rows = _db_query(
             "SELECT pm2_5, pm10 FROM dust_data "
             "WHERE timestamp >= %s AND timestamp <= %s ORDER BY timestamp ASC",
             (start_time, end_time),
         )
-        summary = _summarize_dust_rows(rows)
-        if "pm2_5_avg" in summary:
-            return f"PM2.5 평균 {summary['pm2_5_avg']}μg/m³(최고 {summary['pm2_5_max']}), PM10 평균 {summary['pm10_avg']}μg/m³입니다."
-        return "해당 기간의 미세먼지 기록이 없습니다."
+        return {"type": "dust", "summary": _summarize_dust_rows(rows)}
     else:
+        # temperature / humidity / temp_humidity 모두 온습도 테이블 조회
         rows = _db_query(
             "SELECT temperature, humidity FROM sensor_data "
             "WHERE timestamp >= %s AND timestamp <= %s ORDER BY timestamp ASC",
             (start_time, end_time),
         )
-        summary = _summarize_sensor_rows(rows)
-        if "temp_avg" in summary:
-            parts = [f"평균 {summary['temp_avg']}°C", f"최저 {summary['temp_min']}°C", f"최고 {summary['temp_max']}°C"]
-            if summary.get("humidity_avg"):
-                parts.append(f"평균 습도 {summary['humidity_avg']}%")
-            return ", ".join(parts) + "입니다."
-        return "해당 기간의 온습도 기록이 없습니다."
+        return {"type": sensor_type, "summary": _summarize_sensor_rows(rows)}
+
+def _format_sensor_history_result(result: dict) -> str:
+    """tool_get_sensor_history 결과를 한국어 문자열로 포맷"""
+    summary = result.get("summary", {})
+    sensor_type = result.get("type", "temperature")
+    if "message" in summary:
+        return summary["message"]
+    if sensor_type == "dust":
+        return (
+            f"PM2.5 평균 {summary['pm2_5_avg']}μg/m³(최고 {summary['pm2_5_max']}), "
+            f"PM10 평균 {summary['pm10_avg']}μg/m³입니다."
+        )
+    parts = []
+    if "temp_avg" in summary:
+        parts.append(f"평균 {summary['temp_avg']}°C")
+        parts.append(f"최저 {summary['temp_min']}°C")
+        parts.append(f"최고 {summary['temp_max']}°C")
+    if sensor_type in ("humidity", "temp_humidity") and summary.get("humidity_avg"):
+        parts.append(f"평균 습도 {summary['humidity_avg']}%")
+    return ", ".join(parts) + "입니다." if parts else "해당 기간의 기록이 없습니다."
+
 
 def tool_get_aircon_history(query_type: str = "recent", limit: int = 5) -> str:
     """에어컨 동작 이력 또는 오늘 횟수 조회"""
@@ -638,85 +651,74 @@ def _build_system_prompt() -> str:
 - 대기 중인 에어컨 예약: {pending_str}
 - 시스템 상태: {sys_str}
 
+[데이터베이스 권한]
+이 스마트홈 시스템의 MariaDB에는 과거 수개월~수년치의 온습도/미세먼지 이력과 에어컨 제어 기록이 영구 저장되어 있습니다.
+"지난 달", "지난 주", "작년", "N개월 전", "N일 전" 등 어떤 과거 기간/시점을 요청해도 반드시 DB를 조회하세요.
+절대 "제공할 수 없다", "오늘 데이터만 있다" 같은 답변을 하지 마세요.
+
 [응답 JSON 스키마]
 반드시 아래 JSON 형식으로만 응답하세요:
 {{
-  "thought": "사용자의 의도 분석 및 선택한 동작 이유",
-  "action": "none" | "control_aircon" | "create_aircon_schedule" | "list_aircon_schedules" | "cancel_aircon_schedule" | "control_torch" | "control_servo" | "get_sensor_at" | "get_sensor_history" | "get_aircon_history" | "vision",
-  "params": {{}},
-  "reply": "사용자에게 전달할 친절한 한국어 답변 (1~2문장)"
+  "thought": "사용자 의도 분석 및 필요한 액션 결정 이유",
+  "actions": [
+    {{"action": "액션명", "params": {{...}}}},
+    {{"action": "액션명2", "params": {{...}}}}
+  ],
+  "reply": "사용자에게 전달할 친절한 한국어 답변 (1~2문장, DB 조회가 필요한 경우 빈 문자열 허용)"
 }}
+
+- actions 배열에 여러 액션을 순서대로 나열하면 모두 실행됩니다.
+- 단순 질문이나 즉시 답변 가능한 경우 actions: [{{"action": "none", "params": {{}}}}]로 reply에 직접 답하세요.
+- DB 조회 결과가 있어야 답할 수 있는 경우(과거 통계, 이력 등) reply는 빈 문자열("")로 두어도 됩니다. 시스템이 결과를 받아 Gemini가 자연어로 합성합니다.
 
 [Action별 규칙 및 파라미터]
 1. "none":
    - 추가 하드웨어/DB 작업 없이 즉시 답변할 때 사용.
-   - 현재 온습도/미세먼지 질문 ("지금 몇도야?", "습도 어때?", "미세먼지 얼마야?", "공기질 어때?", "온도랑 습도 둘 다")
-     * 온도를 답할 때는 반드시 '°C' 또는 '도'를 포함할 것.
-     * 습도를 답할 때는 반드시 '%'를 포함할 것.
-     * 미세먼지를 답할 때는 반드시 'PM2.5', 'PM10' 또는 '미세먼지'를 포함할 것.
-   - 시스템 상태 질문 ("CPU 온도 알려줘", "메모리 사용량", "시스템 상태")
-     * 위 [시스템 상태]의 수치를 활용해 답변할 것.
-   - 에어컨 켜짐 상태 질문 ("에어컨 켜져 있어?", "지금 작동 중이야?")
-     * 위 [에어컨 상태]를 확인하고 켜져 있는지 꺼져 있는지 명확히 답변할 것.
-   - 조언/추론/판단 질문 ("에어컨 켜야 할까?", "환기해야 할까?", "창문 열어도 돼?", "지금 쾌적해?")
-     * 현재 온습도/미세먼지 수치를 바탕으로 친절하게 조언할 것. (에어컨을 제어하지 마세요!)
+   - 현재 온습도/미세먼지/시스템 상태/에어컨 상태 질문 → 위 [현재 실시간 정보]를 기반으로 reply에 직접 답할 것.
+     * 온도: 반드시 '°C' 또는 '도' 포함, 습도: '%' 포함, 미세먼지: 'PM2.5', 'PM10' 포함.
+   - 조언/추론 질문 ("에어컨 켜야 할까?", "환기해야 해?") → 현재 수치 기반으로 조언. 절대 에어컨 제어 안 함.
    - 일반 대화 ("안녕", "고마워", "뭘 할 수 있어?")
 
 2. "control_aircon":
-   - 사용자가 '지금 즉시' 에어컨을 켜거나 끄거나 설정을 바꾸라고 직접 명령할 때만 사용.
-   - params:
-     * "mode": "off" (끄기) | "cool" (냉방) | "dehumidify" (제습) | "power_cool" (파워냉방)
-     * "temp": 희망 온도 (정수 18~30, 미언급 시 최근 설정 또는 25)
-     * "fan": 풍량 ("weak" | "medium" | "strong" | "auto", 미언급 시 auto)
-   - "에어컨 켜야 할까?" 같은 조언 질문이나 "N시간 뒤에 꺼줘" 같은 예약은 절대 control_aircon이 아닙니다!
+   - 지금 즉시 에어컨 켜기/끄기/설정 변경 직접 명령일 때만 사용.
+   - params: {{"mode": "off"|"cool"|"dehumidify"|"power_cool", "temp": 18~30, "fan": "weak"|"medium"|"strong"|"auto"}}
+   - "에어컨 켜야 할까?", "N시간 뒤에 꺼줘"는 절대 control_aircon 아님!
 
 3. "create_aircon_schedule":
-   - 미래 시각에 에어컨 켜기/끄기 예약을 요청할 때 사용 (예: "오늘 밤 11시에 꺼줘", "1시간 뒤에 켜줘", "내일 오전 7시에 25도 냉방 켜줘").
-   - params:
-     * "action": "on" | "off"
-     * "scheduled_at": "YYYY-MM-DD HH:MM:SS" (현재 기준 시각을 바탕으로 정확히 계산된 미래 시각)
-     * "mode": "cool" | "dry" (on일 때, 기본 "cool")
-     * "temperature": 정수 18~30 (on일 때, 기본 25)
-     * "wind": "auto" | "low" | "mid" | "high" (on일 때, 기본 "auto")
+   - 미래 특정 시각에 에어컨 켜기/끄기 예약.
+   - params: {{"action": "on"|"off", "scheduled_at": "YYYY-MM-DD HH:MM:SS", "mode": "cool"|"dry", "temperature": 18~30, "wind": "auto"|"low"|"mid"|"high"}}
 
-4. "list_aircon_schedules":
-   - 에어컨 예약 목록 확인/조회 요청 ("예약 보여줘", "예약된 거 있어?")
-   - params: {{}}
+4. "list_aircon_schedules": 에약 목록 조회. params: {{}}
 
-5. "cancel_aircon_schedule":
-   - 에어컨 예약 취소 요청 ("예약 취소해줘", "1번 예약 취소")
-   - params: {{"id": int 또는 null}}
+5. "cancel_aircon_schedule": 예약 취소. params: {{"id": int 또는 null}}
 
-6. "control_torch":
-   - 스마트폰 플래시/손전등/불 켜기 및 끄기 명령 ("플래시 켜줘", "손전등 꺼줘", "불 켜줘", "불 꺼줘")
-   - params: {{"action": "on" | "off"}}
+6. "control_torch": 플래시/손전등 제어. params: {{"action": "on"|"off"}}
 
-7. "control_servo":
-   - CCTV 카메라 방향 조절 명령 ("카메라 왼쪽으로", "카메라 위로 올려줘", "웹캠 오른쪽")
-   - params: {{"direction": "left" | "right" | "up" | "down"}}
+7. "control_servo": 카메라 방향 제어. params: {{"direction": "left"|"right"|"up"|"down"}}
 
 8. "get_sensor_at":
-   - 과거 특정 시점의 온습도/미세먼지 질문 ("1시간 전 온도", "30분 전 미세먼지", "2026년 1월 1일 00시 온도", "어제 3시 습도")
-   - params:
-     * "sensor": "temperature" | "humidity" | "dust" | "temp_humidity"
-     * "target_time": "YYYY-MM-DD HH:MM:SS" (현재 기준 시각에서 계산한 과거 시각)
+   - 과거 특정 시점의 온습도/미세먼지 ("1시간 전 온도", "어제 3시 습도", "2026년 1월 1일 00시 온도")
+   - params: {{"sensor": "temperature"|"humidity"|"temp_humidity"|"dust", "target_time": "YYYY-MM-DD HH:MM:SS"}}
 
 9. "get_sensor_history":
-   - 특정 기간/범위의 통계 질문 ("오늘 평균 온도", "어제 최고 온도", "최근 3시간 미세먼지 통계", "26년도 1월 평균 온도")
-   - params:
-     * "sensor": "temperature" | "humidity" | "dust"
-     * "start_time": "YYYY-MM-DD HH:MM:SS"
-     * "end_time": "YYYY-MM-DD HH:MM:SS"
+   - 특정 기간 통계 ("오늘 평균 온도", "지난 달 평균 온습도", "어제 최고 온도", "최근 3시간 미세먼지", "26년도 1월 평균 온도")
+   - params: {{"sensor": "temperature"|"humidity"|"temp_humidity"|"dust", "start_time": "YYYY-MM-DD HH:MM:SS", "end_time": "YYYY-MM-DD HH:MM:SS"}}
+   - 온도와 습도를 함께 묻는 경우 sensor="temp_humidity" 사용.
+   - "지난 달" → 저번달 1일~말일, "지난 주" → 저번 월~일, "이번 달" → 이번달 1일~현재.
 
 10. "get_aircon_history":
-    - 에어컨 제어 기록 또는 오늘 제어 횟수 질문 ("오늘 에어컨 몇 번 켰어?", "가장 최근 에어컨 동작 기록")
-    - params:
-      * "query_type": "count_today" (오늘 몇 번 켰는지) | "recent" (최근 제어 기록 목록)
-      * "limit": int (recent일 때 이력 개수, 기본 5)
+    - 에어컨 제어 기록/횟수 질문.
+    - params: {{"query_type": "count_today"|"recent", "limit": int}}
 
 11. "vision":
-    - CCTV 영상/방 상태를 직접 확인해야 하는 시각적 질문 ("방에 불 켜져 있어?", "방 어때?", "실내 모습 봐줘", "방 어두워?")
+    - CCTV 실내 시각 질문 ("방에 불 켜져 있어?", "방 어때?", "실내 모습 봐줘")
     - params: {{}}
+
+[복합 명령 예시]
+- "에어컨 켜고 플래시도 켜줘" → actions: [control_aircon, control_torch]
+- "에어컨 끄고 2시간 후에 다시 켜줘" → actions: [control_aircon(off), create_aircon_schedule(on)]
+- "지난 달 평균 온습도 알려줘" → actions: [get_sensor_history(temp_humidity)]
+- "오늘이랑 어제 평균 온도 비교해줘" → actions: [get_sensor_history(오늘), get_sensor_history(어제)]
 """
     return prompt
 
@@ -774,45 +776,32 @@ def _call_gemini_json(user_message: str, history: list, system_prompt: str) -> d
 
     return {
         "thought": f"Gemini API 오류: {last_err}",
-        "action": "none",
-        "params": {},
+        "actions": [{"action": "none", "params": {}}],
         "reply": "AI 서비스 연결 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
     }
 
-def _execute_action(parsed: dict, user_message: str) -> str:
-    action = parsed.get("action", "none")
-    params = parsed.get("params") or {}
-    reply  = parsed.get("reply", "")
-
+def _run_single_action(action: str, params: dict, user_message: str, reply: str) -> tuple[str, bool]:
+    """단일 액션 실행. (결과 문자열, 데이터 조회 여부) 반환"""
     if action == "control_aircon":
-        # 파라미터 정규화
         mode = params.get("mode")
         if not mode and params.get("operation"):
             op = str(params.get("operation")).lower()
             mode = "off" if "off" in op or "끄" in op else "cool"
         if not mode:
             mode = "cool"
-
-        # 온도 및 풍량
         temp = params.get("temp") or params.get("temperature") or params.get("target_temp")
         fan  = params.get("fan") or params.get("wind") or params.get("fan_speed")
-
-        # 부분 변경 시 기존 상태 상속
         if mode != "off" and (temp is None or fan is None):
             current = _get_current_aircon_state()
             if current:
                 if temp is None: temp = current.get("temp")
                 if fan is None:  fan = current.get("fan")
-
         temp = int(temp) if temp is not None else 25
         fan  = str(fan) if fan is not None else "auto"
-
-        # 한국어 풍량 정규화
         fan_map = {"약풍": "weak", "중풍": "medium", "강풍": "strong", "자동": "auto", "자동풍": "auto", "low": "weak", "mid": "medium", "high": "strong"}
         fan = fan_map.get(fan, fan)
-
         res = tool_control_aircon({"mode": mode, "fan": fan, "temp": temp})
-        return _format_aircon_result(res)
+        return _format_aircon_result(res), False
 
     elif action == "create_aircon_schedule":
         sched_at = params.get("scheduled_at") or params.get("time")
@@ -825,22 +814,17 @@ def _execute_action(parsed: dict, user_message: str) -> str:
             mode = "dry"
         wind = params.get("wind") or params.get("fan") or "auto"
         res = tool_create_aircon_schedule({
-            "action": act,
-            "scheduled_at": sched_at,
-            "temperature": temp,
-            "mode": mode,
-            "wind": wind,
+            "action": act, "scheduled_at": sched_at,
+            "temperature": temp, "mode": mode, "wind": wind,
         })
-        return _format_schedule_create(res)
+        return _format_schedule_create(res), False
 
     elif action == "list_aircon_schedules":
-        res = tool_list_aircon_schedules({})
-        return _format_schedule_list(res)
+        return _format_schedule_list(tool_list_aircon_schedules({})), False
 
     elif action == "cancel_aircon_schedule":
         sid = params.get("id")
-        res = tool_cancel_aircon_schedule({"id": sid})
-        return _format_schedule_cancel(res)
+        return _format_schedule_cancel(tool_cancel_aircon_schedule({"id": sid})), False
 
     elif action == "control_torch":
         torch_act = params.get("action") or params.get("power") or "off"
@@ -848,50 +832,113 @@ def _execute_action(parsed: dict, user_message: str) -> str:
             torch_act = "on"
         elif str(torch_act).lower() in ("false", "0", "off", "끄기"):
             torch_act = "off"
-        res = tool_control_torch({"action": torch_act})
-        return _format_torch_result(res, torch_act)
+        return _format_torch_result(tool_control_torch({"action": torch_act}), torch_act), False
 
     elif action == "control_servo":
         direction = params.get("direction", "")
         dir_map = {"왼쪽": "left", "오른쪽": "right", "위": "up", "아래": "down"}
         direction = dir_map.get(direction, direction)
-        res = tool_control_servo({"direction": direction})
-        return _format_servo_result(res)
+        return _format_servo_result(tool_control_servo({"direction": direction})), False
 
     elif action == "get_sensor_at":
         target_time_str = params.get("target_time") or params.get("time")
         sensor_type = params.get("sensor", "temperature")
         try:
             target_dt = _parse_time_arg(target_time_str)
-            return tool_get_sensor_at(sensor_type, target_dt)
+            return tool_get_sensor_at(sensor_type, target_dt), True
         except Exception as e:
-            return f"센서 기록 조회 중 오류가 발생했습니다: {e}"
+            return f"센서 기록 조회 중 오류가 발생했습니다: {e}", False
 
     elif action == "get_sensor_history":
         start_str = params.get("start_time") or params.get("from")
         end_str   = params.get("end_time") or params.get("to")
         sensor_type = params.get("sensor", "temperature")
-        now = datetime.now()
+        _now = datetime.now()
         try:
-            start_dt = _parse_time_arg(start_str) if start_str else now - timedelta(hours=24)
-            end_dt   = _parse_time_arg(end_str) if end_str else now
-            return tool_get_sensor_history(sensor_type, start_dt, end_dt)
+            start_dt = _parse_time_arg(start_str) if start_str else _now - timedelta(hours=24)
+            end_dt   = _parse_time_arg(end_str) if end_str else _now
+            result = tool_get_sensor_history(sensor_type, start_dt, end_dt)
+            return _format_sensor_history_result(result), True
         except Exception as e:
-            return f"센서 통계 조회 중 오류가 발생했습니다: {e}"
+            return f"센서 통계 조회 중 오류가 발생했습니다: {e}", False
 
     elif action == "get_aircon_history":
         q_type = params.get("query_type", "recent")
         limit  = params.get("limit", 5)
-        return tool_get_aircon_history(query_type=q_type, limit=limit)
+        return tool_get_aircon_history(query_type=q_type, limit=limit), True
 
     elif action == "vision":
         frame = _capture_cctv_frame()
         if not frame:
-            return "현재 카메라 연결이 되지 않아 영상을 확인할 수 없습니다."
-        return _vision_query(user_message, frame)
+            return "현재 카메라 연결이 되지 않아 영상을 확인할 수 없습니다.", False
+        return _vision_query(user_message, frame), False
 
-    # action == "none" or fallback
-    return reply or "네, 무엇을 도와드릴까요?"
+    # none or unknown
+    return reply or "네, 무엇을 도와드릴까요?", False
+
+
+def _synthesize_with_gemini(user_message: str, data_results: list[str]) -> str:
+    """2-pass: DB 조회 결과를 Gemini에 전달하여 자연스러운 한국어 답변 합성"""
+    data_text = "\n".join(f"- {r}" for r in data_results)
+    synthesis_prompt = f"""다음은 사용자 질문에 대해 데이터베이스에서 조회한 결과입니다.
+이 데이터를 바탕으로 사용자의 질문에 대해 친절하고 자연스러운 한국어로 1~3문장 답변하세요.
+비교/분석이 필요하면 차이점, 추세, 조언을 포함하세요.
+
+사용자 질문: {user_message}
+
+조회된 데이터:
+{data_text}
+
+답변 (JSON 없이 한국어 텍스트만):"""
+
+    for _ in range(3):
+        try:
+            res = _gemini_client.models.generate_content(
+                model=GEMINI_MODEL,
+                contents=synthesis_prompt,
+            )
+            return (res.text or "").strip()
+        except Exception as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                time.sleep(5)
+                continue
+            break
+    # fallback: 데이터 결과 그대로 반환
+    return " | ".join(data_results)
+
+
+def _execute_actions(parsed: dict, user_message: str) -> str:
+    """복합 액션 배열 순회 실행 + 2-pass synthesis"""
+    # actions 배열 지원 (하위 호환: 단일 action 필드도 처리)
+    raw_reply = parsed.get("reply", "")
+    actions_list = parsed.get("actions")
+    if not actions_list:
+        # 구형 단일 action 포맷 호환
+        single_action = parsed.get("action", "none")
+        single_params = parsed.get("params") or {}
+        actions_list = [{"action": single_action, "params": single_params}]
+
+    results = []
+    has_data_query = False
+
+    for item in actions_list:
+        act = item.get("action", "none")
+        prm = item.get("params") or {}
+        result, is_data = _run_single_action(act, prm, user_message, raw_reply)
+        if act != "none":
+            results.append(result)
+            if is_data:
+                has_data_query = True
+
+    if not results:
+        return raw_reply or "네, 무엇을 도와드릴까요?"
+
+    # 데이터 조회가 포함된 경우 → 2-pass Gemini 합성
+    if has_data_query:
+        return _synthesize_with_gemini(user_message, results)
+
+    # 단순 제어 명령이 여러 개인 경우 결과 합쳐서 반환
+    return " ".join(results)
 
 
 @app.route("/api/chat", methods=["POST"])
@@ -909,8 +956,8 @@ def chat():
     # 2. Gemini API 호출 (구조화된 JSON 응답 생성)
     parsed = _call_gemini_json(user_message, history, system_prompt)
 
-    # 3. 모델이 결정한 액션 수행 및 응답 반환
-    reply = _execute_action(parsed, user_message)
+    # 3. 복합 액션 실행 및 응답 합성
+    reply = _execute_actions(parsed, user_message)
 
     return jsonify({"reply": reply})
 
