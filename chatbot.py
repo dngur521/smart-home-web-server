@@ -3,7 +3,9 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from google import genai
@@ -14,6 +16,7 @@ import psutil
 from dotenv import load_dotenv
 
 load_dotenv()
+import redis as redis_lib
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
@@ -33,6 +36,47 @@ GEMINI_API_KEY    = os.environ.get("GEMINI_API_KEY", "")
 _gemini_client    = genai.Client(api_key=GEMINI_API_KEY)
 FRONTEND_ORIGIN   = os.environ.get("FRONTEND_ORIGIN", "http://localhost:5173")
 MJPG_SNAPSHOT_URL = "http://127.0.0.1:8080/?action=snapshot"
+
+# --- 시스템 데이터 캐시 (30초 TTL) ---
+_data_cache_lock = threading.Lock()
+_data_cache: dict = {"data": None, "ts": 0.0}
+_DATA_CACHE_TTL = 30
+
+def _invalidate_data_cache():
+    with _data_cache_lock:
+        _data_cache["ts"] = 0.0
+
+# --- Redis 세션 ---
+_SESSION_TTL = 1800        # 30분
+_SESSION_MAX_HISTORY = 20  # 최근 20턴 보존
+
+try:
+    _redis_session = redis_lib.Redis(host="localhost", port=6379, decode_responses=True)
+    _redis_session.ping()
+except Exception:
+    _redis_session = None
+
+def _get_session_history(session_id: str) -> list:
+    if not _redis_session:
+        return []
+    try:
+        raw = _redis_session.get(f"chat:session:{session_id}")
+        return json.loads(raw) if raw else []
+    except Exception:
+        return []
+
+def _save_session_history(session_id: str, history: list):
+    if not _redis_session:
+        return
+    try:
+        trimmed = history[-_SESSION_MAX_HISTORY:]
+        _redis_session.setex(
+            f"chat:session:{session_id}",
+            _SESSION_TTL,
+            json.dumps(trimmed, ensure_ascii=False),
+        )
+    except Exception:
+        pass
 
 app = Flask(__name__)
 app.json.ensure_ascii = False
@@ -577,25 +621,19 @@ def _vision_query(user_message: str, frame: bytes) -> str:
     return "현재 AI 사용량 한도로 인해 이미지 분석을 일시적으로 완료할 수 없습니다."
 
 # --- 시스템 프롬프트 및 컨텍스트 빌더 ---
-def _build_system_prompt() -> str:
-    now = datetime.now()
-    today_str = now.strftime("%Y-%m-%d")
-    yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-    tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
-    weekdays = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
-    weekday_str = weekdays[now.weekday()]
+def _fetch_system_data() -> dict:
+    """DB/subprocess 데이터를 30초 캐시로 반환. time-sensitive 데이터는 제외."""
+    now_ts = time.time()
+    with _data_cache_lock:
+        if _data_cache["data"] and (now_ts - _data_cache["ts"]) < _DATA_CACHE_TTL:
+            return _data_cache["data"]
 
-    # 실시간 센서
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
     cur_s = tool_get_current_temperature({})
     cur_h = tool_get_current_humidity({})
     cur_d = tool_get_current_dust({})
-    temp_val = cur_s.get("temperature", "확인불가")
-    hum_val  = cur_h.get("humidity_percent", "확인불가")
-    pm25_val = cur_d.get("pm2_5", "확인불가")
-    pm10_val = cur_d.get("pm10", "확인불가")
 
-    # 오늘 통계
-    today_start = datetime(now.year, now.month, now.day)
     stats = _db_query(
         "SELECT ROUND(AVG(temperature),1) ta, ROUND(MIN(temperature),1) tmin,"
         " ROUND(MAX(temperature),1) tmax, ROUND(AVG(humidity),1) ha"
@@ -618,24 +656,56 @@ def _build_system_prompt() -> str:
         ds = dust_stats[0]
         today_dust_stats_str = f"PM2.5 평균 {ds['p25a']}μg/m³(최고 {ds['p25m']}), PM10 평균 {ds['p10a']}μg/m³"
 
-    # 에어컨 상태
     is_on = _is_aircon_on()
     aircon_state = _get_current_aircon_state()
     aircon_status_str = f"현재 실제 상태: {'켜짐(ON)' if is_on else '꺼짐(OFF)'}"
     if aircon_state:
         aircon_status_str += f", 최근 설정: 모드={aircon_state['mode']}, 온도={aircon_state['temp']}°C, 풍량={aircon_state['fan']}"
 
-    # 대기 중인 예약
-    schedules = _db_query("SELECT id, action, scheduled_at, temperature, mode FROM aircon_schedule WHERE status='pending' ORDER BY scheduled_at ASC")
+    schedules = _db_query(
+        "SELECT id, action, scheduled_at, temperature, mode FROM aircon_schedule"
+        " WHERE status='pending' ORDER BY scheduled_at ASC"
+    )
     if schedules:
         sched_list = [f"[#{s['id']}] {s['scheduled_at']}: {'켜기' if s['action']=='on' else '끄기'}" for s in schedules]
         pending_str = ", ".join(sched_list)
     else:
         pending_str = "없음"
 
-    # 시스템 통계
     sys_stats = tool_get_system_stats({})
-    sys_str = f"CPU 온도: {sys_stats.get('cpu_temp')}, CPU 사용률: {sys_stats.get('cpu_usage_percent')}%, RAM: {sys_stats.get('ram_used_mb')}MB/{sys_stats.get('ram_total_mb')}MB ({sys_stats.get('ram_percent')}%), 디스크 사용: {sys_stats.get('disk_percent')}%"
+    sys_str = (
+        f"CPU 온도: {sys_stats.get('cpu_temp')}, CPU 사용률: {sys_stats.get('cpu_usage_percent')}%,"
+        f" RAM: {sys_stats.get('ram_used_mb')}MB/{sys_stats.get('ram_total_mb')}MB"
+        f" ({sys_stats.get('ram_percent')}%), 디스크 사용: {sys_stats.get('disk_percent')}%"
+    )
+
+    data = {
+        "temp_val":            cur_s.get("temperature", "확인불가"),
+        "hum_val":             cur_h.get("humidity_percent", "확인불가"),
+        "pm25_val":            cur_d.get("pm2_5", "확인불가"),
+        "pm10_val":            cur_d.get("pm10", "확인불가"),
+        "today_stats_str":     today_stats_str,
+        "today_dust_stats_str": today_dust_stats_str,
+        "aircon_status_str":   aircon_status_str,
+        "pending_str":         pending_str,
+        "sys_str":             sys_str,
+    }
+
+    with _data_cache_lock:
+        _data_cache["data"] = data
+        _data_cache["ts"] = time.time()
+    return data
+
+
+def _build_system_prompt() -> str:
+    now = datetime.now()
+    today_str = now.strftime("%Y-%m-%d")
+    yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    weekdays = ["월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일"]
+    weekday_str = weekdays[now.weekday()]
+
+    d = _fetch_system_data()
 
     prompt = f"""당신은 스마트홈 AI 어시스턴트입니다.
 사용자의 질문 또는 명령을 분석하여 반드시 지정된 JSON 형식으로만 응답해야 합니다.
@@ -643,13 +713,13 @@ def _build_system_prompt() -> str:
 [현재 실시간 시스템 및 환경 정보]
 - 현재 기준 시각: {now.strftime("%Y-%m-%d %H:%M:%S")} KST ({weekday_str})
 - 오늘: {today_str} | 어제: {yesterday_str} | 내일: {tomorrow_str}
-- 현재 실내 온습도: 실내 온도 {temp_val}°C, 실내 습도 {hum_val}%
-- 현재 실내 미세먼지: PM2.5 {pm25_val}μg/m³, PM10 {pm10_val}μg/m³
-- 오늘 온습도 통계: {today_stats_str}
-- 오늘 미세먼지 통계: {today_dust_stats_str}
-- 에어컨 상태: {aircon_status_str}
-- 대기 중인 에어컨 예약: {pending_str}
-- 시스템 상태: {sys_str}
+- 현재 실내 온습도: 실내 온도 {d["temp_val"]}°C, 실내 습도 {d["hum_val"]}%
+- 현재 실내 미세먼지: PM2.5 {d["pm25_val"]}μg/m³, PM10 {d["pm10_val"]}μg/m³
+- 오늘 온습도 통계: {d["today_stats_str"]}
+- 오늘 미세먼지 통계: {d["today_dust_stats_str"]}
+- 에어컨 상태: {d["aircon_status_str"]}
+- 대기 중인 에어컨 예약: {d["pending_str"]}
+- 시스템 상태: {d["sys_str"]}
 
 [데이터베이스 권한]
 이 스마트홈 시스템의 MariaDB에는 과거 수개월~수년치의 온습도/미세먼지 이력과 에어컨 제어 기록이 영구 저장되어 있습니다.
@@ -801,6 +871,8 @@ def _run_single_action(action: str, params: dict, user_message: str, reply: str)
         fan_map = {"약풍": "weak", "중풍": "medium", "강풍": "strong", "자동": "auto", "자동풍": "auto", "low": "weak", "mid": "medium", "high": "strong"}
         fan = fan_map.get(fan, fan)
         res = tool_control_aircon({"mode": mode, "fan": fan, "temp": temp})
+        if res.get("success"):
+            _invalidate_data_cache()
         return _format_aircon_result(res), False
 
     elif action == "create_aircon_schedule":
@@ -813,10 +885,25 @@ def _run_single_action(action: str, params: dict, user_message: str, reply: str)
         if mode in ("dehumidify", "제습"):
             mode = "dry"
         wind = params.get("wind") or params.get("fan") or "auto"
+
+        # 서버사이드 시간 검증: Gemini 계산 오류 조기 차단
+        if sched_at:
+            try:
+                sched_dt = _parse_time_arg(sched_at) if isinstance(sched_at, str) else sched_at
+                diff_sec = (sched_dt - datetime.now()).total_seconds()
+                if diff_sec < 0:
+                    return f"예약 시간({str(sched_at)[:16]})이 현재 시각보다 이전입니다. 예약 시간을 다시 말씀해 주세요.", False
+                if diff_sec > 30 * 24 * 3600:
+                    return "예약 시간이 30일 이상 미래로 설정되었습니다. 다시 확인해 주세요.", False
+            except Exception:
+                pass
+
         res = tool_create_aircon_schedule({
             "action": act, "scheduled_at": sched_at,
             "temperature": temp, "mode": mode, "wind": wind,
         })
+        if res.get("success"):
+            _invalidate_data_cache()
         return _format_schedule_create(res), False
 
     elif action == "list_aircon_schedules":
@@ -824,7 +911,10 @@ def _run_single_action(action: str, params: dict, user_message: str, reply: str)
 
     elif action == "cancel_aircon_schedule":
         sid = params.get("id")
-        return _format_schedule_cancel(tool_cancel_aircon_schedule({"id": sid})), False
+        res = tool_cancel_aircon_schedule({"id": sid})
+        if res.get("success"):
+            _invalidate_data_cache()
+        return _format_schedule_cancel(res), False
 
     elif action == "control_torch":
         torch_act = params.get("action") or params.get("power") or "off"
@@ -943,23 +1033,38 @@ def _execute_actions(parsed: dict, user_message: str) -> str:
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
-    body         = request.get_json(silent=True) or {}
-    user_message = (body.get("message") or "").strip()
-    history      = body.get("history") or []
+    body           = request.get_json(silent=True) or {}
+    user_message   = (body.get("message") or "").strip()
+    client_history = body.get("history") or []
+    session_id     = (body.get("session_id") or "").strip()
 
     if not user_message:
         return jsonify({"error": "메시지가 비어 있습니다."}), 400
 
-    # 1. 실시간 컨텍스트 및 시스템 프롬프트 구성
+    # 세션 이력 해석: session_id 있으면 Redis 우선, 없으면 새 세션 발급
+    if session_id:
+        history = _get_session_history(session_id) or client_history
+    else:
+        session_id = str(uuid.uuid4())
+        history = client_history
+
+    # 1. 시스템 프롬프트 구성 (데이터는 30초 캐시)
     system_prompt = _build_system_prompt()
 
-    # 2. Gemini API 호출 (구조화된 JSON 응답 생성)
+    # 2. Gemini API 호출
     parsed = _call_gemini_json(user_message, history, system_prompt)
 
     # 3. 복합 액션 실행 및 응답 합성
     reply = _execute_actions(parsed, user_message)
 
-    return jsonify({"reply": reply})
+    # 대화 이력 저장
+    new_history = history + [
+        {"role": "user",      "content": user_message},
+        {"role": "assistant", "content": reply},
+    ]
+    _save_session_history(session_id, new_history)
+
+    return jsonify({"reply": reply, "session_id": session_id})
 
 
 @app.route("/api/chat/health", methods=["GET"])
